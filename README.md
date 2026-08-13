@@ -12,8 +12,8 @@ This project extracts structural invariants from traditional Korean mathematical
    - Hexagonal lattice topology where overlapping 7-node hexagonal groups form ultra-fast local repair clusters (276 ns).
 2. **`KroneckerAntiDiagLatticeRecovery`** $\rightarrow$ Derived from **Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo (백자생성교수도 & 백자생성순수도, 百子生成交數圖 & 百子生成順數圖)**
    - Paired Yin-Yang 9x9 diagrams (음양 짝):
-     - **Yang Diagram (백자생성교수도)**: 3x3 Kronecker palace hierarchy ($L \otimes L$) forming 9 local palace parity groups.
-     - **Yin Diagram (백자생성순수도)**: Anti-diagonal symmetry groups forming orthogonal cross-palace parity groups.
+     - **Yang Diagram (백자생성교수도)**: 3x3 Kronecker sub-grid / block partition hierarchy ($L \otimes L$) forming 9 local sub-grid parity groups.
+     - **Yin Diagram (백자생성순수도)**: Anti-diagonal symmetry groups forming orthogonal cross-block parity groups.
    - Applied to the 81-cell core region, creating a 3-tier LRC storage array topology (5.2 MB memory, 22 ns write ingest).
 
 ### Domain Separation & Categorization Matrix
@@ -37,8 +37,8 @@ Rather than forcing all historical diagram topologies into a single network FEC 
    - **Generation size 81 (9x9 diagram)** creates a decoding delay bottleneck in real-time streaming, but becomes a **hierarchical advantage for storage arrays**.
    - **Asymmetric Asynchronous Cost**: `22 ns Write/Ingest Process` vs `998 ns Rebuild/Repair`. In RAID/LRC, normal writes/reads dominate ($>99\%$), making ultra-cheap normal-path updates (22 ns, 5.2 MB) ideal for storage controllers.
    - **3-Tier Failure Domain Hierarchy**:
-     $$\text{3x3 Palace Repair (교수도)} \longrightarrow \text{Anti-Diagonal Cross Repair (순수도)} \longrightarrow \text{Global Parity Recovery}$$
-   - **Physical Placement Rule**: Logical $3\times3$ neighborhood $\neq$ Same physical failure domain. Logical cells are interleaved across physical drives/nodes to guarantee drive-loss tolerance.
+     $$\text{3x3 Sub-Grid Local Repair (교수도)} \longrightarrow \text{Anti-Diagonal Cross Repair (순수도)} \longrightarrow \text{Global Parity Recovery}$$
+   - **Physical Placement Rule**: Logical $3\times3$ sub-grid neighborhood $\neq$ Same physical failure domain. Logical cells are interleaved across physical drives/nodes to guarantee drive-loss tolerance.
 
 3. **`MagicSquare` $\rightarrow$ Negative Control**
    - Proves that grid regularity or number patterns alone yield zero recovery advantage ($2.39\%$ vs $2.44\%$ baseline).
@@ -62,7 +62,7 @@ Rather than forcing all historical diagram topologies into a single network FEC 
 Measured on a 10x10 grid with 10,000 sessions (JIT-warmed):
 
 | Strategy | Memory | RegisterSession | ProcessPacket (Write Ingest) | TryRecoverSession (Rebuild) | Domain Suitability Evaluation |
-|----------|--------|----------------|------------------------------|-----------------------------|------------------------------|
+|----------|--------|----------------|--------------|------------------|-------------------|
 | **Baseline** | 2.4 MB | 1,043 ns | 18 ns | 1,037 ns | Unvalidated Simple Vector |
 | **MagicSquare** | 7.7 MB | 2,203 ns | 17 ns | 1,039 ns | Unused (Negative Control) |
 | **Hexagonal** | 30.5 MB | 6,343 ns | 27 ns | **276 ns** | Ultra-Fast 1st-Line Local Filter |
@@ -104,8 +104,8 @@ dotnet run -c Release --no-build -- 1 5
    - 육각형 상호 오버랩 격자 토폴로지. 7개 노드 그룹이 초고속 국소 복구 클러스터(276 ns)를 형성.
 2. **`KroneckerAntiDiagLatticeRecovery`** $\rightarrow$ **백자생성교수도 & 백자생성순수도 (百子生成交數圖 & 百子生成順數圖, Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo)** 기반
    - 음양 짝(Yin-Yang pair) 9×9 도상:
-     - **양도 (백자생성교수도)**: 낙서의 3×3 자기 크로네커 곱($L \otimes L$) 분해로 9개 궁(Palace) 국소 패리티 그룹 형성.
-     - **음도 (백자생성순수도)**: 반대각선 대칭 축으로 궁 간 교차 직교(Cross-palace orthogonal) 패리티 그룹 형성.
+     - **양도 (백자생성교수도)**: 낙서의 3×3 자기 크로네커 곱($L \otimes L$) 분해로 9개 서브그리드/블록 파티션(Sub-grid / Block partition) 국소 패리티 그룹 형성.
+     - **음도 (백자생성순수도)**: 반대각선 대칭 축으로 블록 간 교차 직교(Cross-block orthogonal) 패리티 그룹 형성.
    - 81셀 영역에 적용하여 3단계 계층형 LRC 스토리지 어레이 토폴로지(5.2 MB 메모리, 22 ns 쓰기 수신)를 구축함.
 
 ### 도메인 분리 및 역할 정의 (Domain Separation Matrix)
@@ -129,7 +129,7 @@ dotnet run -c Release --no-build -- 1 5
    - **Generation Size 81 (9×9 도상)**: 실시간 스트리밍에서는 축적 지연이 발생하지만, **스토리지 어레이(RAID/LRC)에서는 계층적 구조의 이점**이 됨.
    - **비대칭 비동기 비용**: `22 ns 정상 쓰기(Ingest)` vs `998 ns 장애 복구(Rebuild)`. 정상 입출력이 99% 이상인 저장장치 특성상 22 ns / 5.2 MB의 캐시 친화적 정상 경로가 극히 유리함.
    - **3단계 장애 도메인 계층**:
-     $$\text{3×3 궁 현지 복구 (백자생성교수도)} \longrightarrow \text{반대각 교차 그룹 복구 (백자생성순수도)} \longrightarrow \text{전역 패리티 복구}$$
+     $$\text{3×3 서브그리드 현지 복구 (백자생성교수도)} \longrightarrow \text{반대각 교차 그룹 복구 (백자생성순수도)} \longrightarrow \text{전역 패리티 복구}$$
    - **물리적 분산 배치 규칙**: 논리적 3×3 인접성이 동일한 물리 드라이브/노드에 배치되지 않도록 인터리빙하여 드라이브 유실 내성 확보.
 
 3. **`MagicSquare` $\rightarrow$ 음성 대조군 (Negative Control)**
