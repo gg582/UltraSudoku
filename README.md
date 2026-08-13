@@ -38,31 +38,49 @@ All synchronization is via `System.Threading.Interlocked` only. The hot loop all
 | **Sessions Won** | 31 | 34 | 32 | **38** | 35 |
 | **Throughput (pkt/s)** | **688,722** | 579,078 | 586,224 | 473,082 | 520,369 |
 
+### Computational Load (Microbenchmark)
+
+Measured on a 10x10 grid with ~50 blank cells, 10,000 sessions, JIT-warmed.
+`ProcessPacket` cost is isolated by subtracting `RegisterSession` amortization.
+
+| Strategy | Memory | RegisterSession | ProcessPacket | TryRecoverSession |
+|----------|--------|----------------|--------------|------------------|
+| **Baseline** | 2.4 MB | 953 ns | **16 ns** | 1,019 ns |
+| **MagicSquare** | 7.7 MB | 2,468 ns | **13 ns** | 981 ns |
+| **Hexagonal** | 30.5 MB | 5,424 ns | **13 ns** | **265 ns** |
+| **HtpXorErasure** | 34.8 MB | 6,092 ns | 74 ns | 322 ns |
+| **ReedSolomon** | 34.7 MB | 5,859 ns | 82 ns | 349 ns |
+
+Key observations:
+- **ProcessPacket** — Baseline / MagicSquare / Hexagonal are all ~13-16 ns. HtpXorErasure and ReedSolomon are 5-6x heavier (74-82 ns) because every arriving packet must update XOR or GF(2^8) parity accumulators in addition to the hex-group and vector state. This is the primary driver of their lower throughput in the simulation.
+- **TryRecoverSession** — Hexagonal (265 ns) is ~3.8x faster than Baseline (1,019 ns). The overlapping hex groups resolve the missing cell early, short-circuiting the full vector scan. HtpXorErasure and ReedSolomon add only ~60-80 ns over Hexagonal despite carrying the extra XOR/GF check.
+- **RegisterSession** — Cost grows with data-structure complexity. Baseline is cheapest (953 ns); FEC strategies pay ~6x more (5,859-6,092 ns) to initialize hex groups and parity tables.
+- **Memory** — Baseline (2.4 MB) fits in L3. MagicSquare (7.7 MB) stays in L3 on most hardware. Hexagonal/HtpXorErasure/ReedSolomon (~30-35 MB) exceed typical L3 and cause DRAM pressure, which explains the throughput gap in the simulation relative to the per-call ns costs.
+
 ### Comparative Analysis
 
 **1. Recovery Rate**
 - HtpXorErasure (184.30%) and ReedSolomon (184.47%) dwarf the other three strategies by two orders of magnitude.
-- The key insight: FEC-based strategies recover corrupted packets as well as dropped ones, so the numerator is not bounded by the drop count. The XOR / GF(2^8) parity check catches any packet whose payload does not match the group's expected syndrome, recovering the correct value from stored parity even when the packet was delivered with a wrong value.
-- Among the non-FEC strategies, Hexagonal (3.80%) outperforms Baseline (2.44%) and MagicSquare (2.39%). The overlapping hex groups create more single-gap opportunities per cell.
-- MagicSquare's uniqueness masks eliminate false positives without adding raw recovery volume, hence its rate sits slightly below Baseline.
+- FEC-based strategies recover corrupted packets as well as dropped ones. The XOR / GF(2^8) parity check catches any packet whose payload does not match the group's expected syndrome, recovering the correct value from stored parity even when the packet was delivered with a wrong value.
+- Among the non-FEC strategies, Hexagonal (3.80%) outperforms Baseline (2.44%) and MagicSquare (2.39%). Overlapping hex groups create more single-gap opportunities per cell.
+- MagicSquare's uniqueness masks eliminate false positives without adding raw recovery volume, so its rate sits slightly below Baseline.
 
 **2. Throughput**
-- Baseline achieves the highest throughput (688K pkt/s) because it has the fewest data structures.
-- MagicSquare (579K pkt/s) pays a small price for the bitmask uniqueness checks; Hexagonal (586K pkt/s) is similar.
-- ReedSolomon (520K pkt/s) incurs GF(2^8) multiply operations on each packet arrival.
-- HtpXorErasure (473K pkt/s) is the slowest: it updates hex groups, XOR parity, and baseline vectors simultaneously, with more memory traffic than any other strategy.
+- Baseline is the fastest in both simulation (688K pkt/s) and per-call cost (16 ns/ProcessPacket). The fewest data structures means the lowest memory footprint (2.4 MB) and best cache behavior.
+- HtpXorErasure (473K pkt/s) is the slowest: 74 ns/packet due to XOR parity updates on top of hex groups and vectors, plus a ~35 MB working set that spills to DRAM.
+- The simulation throughput gap (688K → 473K, -31%) is larger than the per-call gap (16 ns → 74 ns, 4.6x) because the simulation also contends for cache lines across concurrent threads, amplifying the DRAM pressure from the larger working set.
 
 **3. Session Completion (Won)**
-- HtpXorErasure leads with 38 sessions won per minute, primarily because FEC interception prevents many corrupted values from entering the game state.
-- MagicSquare (34) benefits from its uniqueness guard, and ReedSolomon (35) similarly intercepts corrupted packets before game state injection.
-- Baseline (31) and Hexagonal (32) accept any geometrically consistent candidate, which can include wrong values.
+- HtpXorErasure leads with 38 sessions won per minute: FEC interception prevents corrupted values from entering the game state.
+- MagicSquare (34) benefits from its global uniqueness guard. ReedSolomon (35) intercepts corrupted packets via the GF syndrome check.
+- Baseline (31) and Hexagonal (32) accept any geometrically consistent candidate and are more vulnerable to false recoveries.
 
 **4. Memory Footprint**
-- Baseline: smallest — only row/col/diag accumulator arrays.
-- MagicSquare: adds 6 x `ulong[MaxSessions x MaxGridSize]` bitmasks (~12 MB total).
-- Hexagonal: adds hex sum/count/membership arrays (~29 MB total). Largest of the first three.
-- HtpXorErasure: hex arrays + XOR parity arrays (`_xorExpectedParity`, `_xorCurrentParity`, `_xorCounts`, `_xorGroupSizes`, `_xorCellGroup`) ~30-31 MB total.
-- ReedSolomon: same as HtpXorErasure plus `_rsCellPos` and three static GF(2^8) tables (512 B each) ~31-32 MB total. Largest overall.
+- Baseline: smallest — only row/col/diag accumulator arrays (2.4 MB, fits L2/L3).
+- MagicSquare: adds 6 x `ulong[MaxSessions x MaxGridSize]` bitmasks (7.7 MB, fits L3).
+- Hexagonal: adds hex sum/count/membership arrays (30.5 MB, exceeds L3 on many CPUs).
+- HtpXorErasure: hex arrays + XOR parity arrays (34.8 MB). Largest runtime working set.
+- ReedSolomon: same as HtpXorErasure plus `_rsCellPos` and three static GF(2^8) tables (34.7 MB). Negligible difference from HtpXorErasure.
 
 **5. Correctness Guarantees**
 - Baseline: **none**. Can recover a value already present in the same row/column.
@@ -73,22 +91,27 @@ All synchronization is via `System.Threading.Interlocked` only. The hot loop all
 
 ### Verdict
 
-- **Use ReedSolomon** when maximizing recovered packet count is the priority and both drop and corruption must be handled. It delivers the **highest absolute recovery** and better algebraic resilience than HtpXorErasure.
-- **Use HtpXorErasure** as a slightly cheaper alternative to ReedSolomon when GF arithmetic overhead is a concern. Nearly identical recovery outcomes at lower CPU cost.
-- **Use MagicSquare** when correctness of the game state matters above all else. It provides the strongest uniqueness guarantee and a solid balance of throughput and completed sessions.
-- **Use Hexagonal** when raw drop recovery (not corruption recovery) is the only goal and FEC overhead is unacceptable. It recovers 60% more dropped packets than Baseline.
-- **Use Baseline** only when memory is extremely constrained and grid corruption is acceptable.
+- **Use ReedSolomon** when maximizing recovered packet count is the priority and both drop and corruption must be handled. It delivers the **highest absolute recovery** and slightly better algebraic resilience than HtpXorErasure at comparable memory and CPU cost.
+- **Use HtpXorErasure** as a marginally cheaper alternative to ReedSolomon when GF(2^8) arithmetic overhead is a concern. Nearly identical recovery outcomes.
+- **Use MagicSquare** when correctness of the game state matters above all else. It provides the strongest uniqueness guarantee with a compact 7.7 MB footprint.
+- **Use Hexagonal** when raw drop recovery is the only goal, FEC overhead is unacceptable, and you can tolerate the 30 MB working set. It recovers 60% more dropped packets than Baseline and has the fastest TryRecoverSession of all strategies (265 ns).
+- **Use Baseline** only when memory is extremely constrained (2.4 MB). Fastest RegisterSession, no correctness guarantees.
 
 ### Build & Run
 
 ```bash
 make
-# 1-minute test for each strategy
-dotnet run -c Release --no-build -- 1 0   # Baseline
-dotnet run -c Release --no-build -- 1 1   # MagicSquare
-dotnet run -c Release --no-build -- 1 2   # Hexagonal
-dotnet run -c Release --no-build -- 1 3   # HtpXorErasure
-dotnet run -c Release --no-build -- 1 4   # ReedSolomon
+
+# Microbenchmark (per-operation latency + memory)
+dotnet run -c Release --no-build -- bench
+
+# Stress test (replace N with duration in minutes, S with strategy index)
+dotnet run -c Release --no-build -- N S
+#   S = 0: Baseline
+#   S = 1: MagicSquare
+#   S = 2: Hexagonal
+#   S = 3: HtpXorErasure
+#   S = 4: ReedSolomon
 
 # Run all 5 strategies sequentially (10-minute each)
 bash run_all_tests.sh
@@ -133,57 +156,80 @@ bash run_all_tests.sh
 | **완료 세션 (Won)** | 31 | 34 | 32 | **38** | 35 |
 | **처리량 (pkt/s)** | **688,722** | 579,078 | 586,224 | 473,082 | 520,369 |
 
+### 연산 부하 (마이크로벤치마크)
+
+10x10 그리드, 공백 셀 ~50개, 세션 10,000개, JIT 워밍업 후 측정.
+`ProcessPacket` 비용은 `RegisterSession` 비용을 분리한 순수 값입니다.
+
+| 전략 | 메모리 | RegisterSession | ProcessPacket | TryRecoverSession |
+|------|--------|----------------|--------------|------------------|
+| **Baseline** | 2.4 MB | 953 ns | **16 ns** | 1,019 ns |
+| **MagicSquare** | 7.7 MB | 2,468 ns | **13 ns** | 981 ns |
+| **Hexagonal** | 30.5 MB | 5,424 ns | **13 ns** | **265 ns** |
+| **HtpXorErasure** | 34.8 MB | 6,092 ns | 74 ns | 322 ns |
+| **ReedSolomon** | 34.7 MB | 5,859 ns | 82 ns | 349 ns |
+
+주요 관찰:
+- **ProcessPacket** — Baseline / MagicSquare / Hexagonal은 모두 ~13-16 ns. HtpXorErasure와 ReedSolomon은 5-6배 무겁습니다(74-82 ns). 패킷 도착마다 XOR 또는 GF(2^8) 패리티 누산기를 육각형 그룹·벡터 상태에 더해 추가 업데이트하기 때문입니다. 시뮬레이션 처리량 하락의 주원인입니다.
+- **TryRecoverSession** — Hexagonal(265 ns)이 Baseline(1,019 ns)보다 ~3.8배 빠릅니다. 오버랩되는 육각형 그룹이 누락 셀을 조기 판별하여 전체 벡터 스캔을 단락(short-circuit)합니다. HtpXorErasure와 ReedSolomon은 Hexagonal 대비 XOR/GF 검사가 추가되지만 60-80 ns 증가에 그칩니다.
+- **RegisterSession** — 자료구조 복잡도에 비례해 비용이 증가합니다. Baseline이 가장 저렴(953 ns), FEC 전략은 육각형 그룹·패리티 테이블 초기화로 ~6배 더 듭니다(5,859-6,092 ns).
+- **메모리** — Baseline(2.4 MB)은 L3에 완전히 적합합니다. MagicSquare(7.7 MB)도 L3 범위입니다. Hexagonal/HtpXorErasure/ReedSolomon(~30-35 MB)은 대부분의 CPU L3를 초과하여 DRAM 압력을 유발하며, 이것이 시뮬레이션에서 처리량 격차를 확대하는 원인입니다.
+
 ### 비교 분석
 
 **1. 복구율**
 - HtpXorErasure(184.30%)와 ReedSolomon(184.47%)은 나머지 세 전략을 두 자릿수 차이로 압도합니다.
-- 핵심 원인: FEC 기반 전략은 드롭 패킷뿐 아니라 **손상 패킷**도 복구합니다. XOR / GF(2^8) 패리티 검사가 잘못된 값의 패킷을 감지하고 저장된 패리티로 정확한 값을 복원하기 때문에, 복구 수가 드롭 수에 묶이지 않습니다.
+- FEC 기반 전략은 드롭 패킷뿐 아니라 **손상 패킷**도 복구합니다. XOR / GF(2^8) 패리티 검사가 잘못된 값의 패킷을 감지하고 저장된 패리티로 정확한 값을 복원하기 때문에, 복구 수가 드롭 수에 묶이지 않습니다.
 - FEC 미사용 전략 중에서는 Hexagonal(3.80%)이 Baseline(2.44%)과 MagicSquare(2.39%)를 능가합니다.
 - MagicSquare의 고유성 마스크는 거짓 양성만 제거하고 원시 복구량은 늘리지 않아 복구율이 Baseline보다 소폭 낮습니다.
 
 **2. 처리량**
-- Baseline이 688K pkt/s로 가장 빠릅니다.
-- MagicSquare(579K)와 Hexagonal(586K)은 유사합니다.
-- ReedSolomon(520K)은 패킷 도착 시마다 GF(2^8) 곱셈 연산이 추가됩니다.
-- HtpXorErasure(473K)가 가장 느립니다. 육각형 그룹·XOR 패리티·벡터를 동시에 업데이트하여 메모리 트래픽이 가장 많습니다.
+- Baseline은 시뮬레이션(688K pkt/s)과 호출당 비용(16 ns/ProcessPacket) 모두 가장 빠릅니다. 가장 단순한 자료구조와 2.4 MB 메모리 풋프린트 덕분에 캐시 효율이 최고입니다.
+- HtpXorErasure(473K pkt/s)가 가장 느립니다. 74 ns/패킷의 XOR 패리티 업데이트와 ~35 MB 워킹 셋이 DRAM 접근을 유발합니다.
+- 시뮬레이션 처리량 격차(688K → 473K, -31%)가 호출당 격차(16 ns → 74 ns, 4.6배)보다 큰 이유는, 시뮬레이션의 멀티스레드 경합이 큰 워킹 셋의 캐시 압력을 더욱 증폭시키기 때문입니다.
 
 **3. 세션 완료 (Won)**
-- HtpXorErasure가 분당 38 세션으로 1위입니다. FEC가 손상 값을 게임 상태 진입 전에 차단하기 때문입니다.
+- HtpXorErasure가 분당 38 세션으로 1위입니다.
 - ReedSolomon(35)과 MagicSquare(34)도 잘못된 값 침투를 억제합니다.
-- Baseline(31)과 Hexagonal(32)은 기하학적으로 일관된 후보면 그대로 수용하여 오염 가능성이 높습니다.
+- Baseline(31)과 Hexagonal(32)은 기하학적으로 일관된 후보면 그대로 수용합니다.
 
 **4. 메모리 사용량**
-- Baseline: 최소 — 행/열/대각 누산 배열만.
-- MagicSquare: 6개의 `ulong[MaxSessions x MaxGridSize]` 마스크 추가(~12 MB).
-- Hexagonal: 육각형 합/카운트/멤버십 배열(~29 MB). 앞 세 전략 중 최대.
-- HtpXorErasure: 육각형 배열 + XOR 패리티 배열 5종 ~30-31 MB.
-- ReedSolomon: HtpXorErasure + `_rsCellPos` + GF(2^8) 정적 테이블(3 x 512 B) ~31-32 MB. 전체 최대.
+- Baseline: 2.4 MB — L2/L3에 완전 적합.
+- MagicSquare: 7.7 MB — L3 범위.
+- Hexagonal: 30.5 MB — 대부분 CPU의 L3 초과.
+- HtpXorErasure: 34.8 MB — 런타임 워킹 셋 최대.
+- ReedSolomon: 34.7 MB — HtpXorErasure와 사실상 동일.
 
 **5. 정합성 보장**
-- Baseline: **없음**. 동일 행/열의 기존 값을 복구해 무효 그리드를 만들 수 있습니다.
+- Baseline: **없음**.
 - MagicSquare: **강함**. 행, 열, 전체 격자에 중복 발생 불가.
 - Hexagonal: **중간**. 지역적 그룹 합 교차 검증. 단, 단일 그룹 합을 깨뜨리지 않는 중복 값은 통과 가능.
 - HtpXorErasure: **중간 + 이레이저 감지**. XOR 패리티로 손상 패킷을 그리드 반영 전 차단. 전역 고유성 가드는 없음.
-- ReedSolomon: **중간 + 대수적으로 강화된 이레이저 감지**. GF(2^8) 신드롬은 단순 XOR보다 충돌 확률이 낮아 손상 패킷 거짓 양성을 더 잘 걸러냅니다. 전역 고유성 가드는 없음.
+- ReedSolomon: **중간 + 대수적으로 강화된 이레이저 감지**. GF(2^8) 신드롬은 단순 XOR보다 충돌 확률이 낮습니다. 전역 고유성 가드는 없음.
 
 ### 결론
 
-- **ReedSolomon**: 드롭과 손상 모두 처리하면서 복구량을 극대화할 때 사용하십시오. **절대 복구 수 최고**, 대수적 내성도 HtpXorErasure보다 우수합니다.
-- **HtpXorErasure**: GF 연산 오버헤드가 부담스러울 때 ReedSolomon의 저비용 대안입니다. 복구 결과는 거의 동일합니다.
-- **MagicSquare**: 게임 상태의 정합성이 최우선일 때 사용하십시오. 가장 강력한 고유성 보장과 안정적인 처리량·완료 세션 균형을 제공합니다.
-- **Hexagonal**: FEC 오버헤드 없이 드롭 패킷 복구만 극대화할 때 사용하십시오. Baseline보다 60% 더 많은 드롭 패킷을 복구합니다.
-- **Baseline**: 메모리가 극도로 제한적이고 그리드 오염 위험을 감수할 수 있을 때만 사용하십시오.
+- **ReedSolomon**: 드롭과 손상 모두 처리하면서 복구량을 극대화할 때. 대수적 내성도 HtpXorErasure보다 소폭 우수합니다.
+- **HtpXorErasure**: GF 연산 오버헤드가 부담스러울 때 ReedSolomon의 저비용 대안.
+- **MagicSquare**: 게임 상태 정합성이 최우선이고 메모리 풋프린트(7.7 MB)가 중요할 때.
+- **Hexagonal**: FEC 없이 드롭 복구 극대화 + 가장 빠른 TryRecoverSession(265 ns). 30 MB 워킹 셋을 감수할 수 있을 때.
+- **Baseline**: 메모리가 극도로 제한적(2.4 MB)이고 그리드 오염을 감수할 때.
 
 ### 빌드 및 실행
 
 ```bash
 make
-# 각 전략별 1분 테스트
-dotnet run -c Release --no-build -- 1 0   # Baseline
-dotnet run -c Release --no-build -- 1 1   # MagicSquare
-dotnet run -c Release --no-build -- 1 2   # Hexagonal
-dotnet run -c Release --no-build -- 1 3   # HtpXorErasure
-dotnet run -c Release --no-build -- 1 4   # ReedSolomon
+
+# 마이크로벤치마크 (연산 부하 + 메모리 측정)
+dotnet run -c Release --no-build -- bench
+
+# 스트레스 테스트 (N=분, S=전략 인덱스)
+dotnet run -c Release --no-build -- N S
+#   S = 0: Baseline
+#   S = 1: MagicSquare
+#   S = 2: Hexagonal
+#   S = 3: HtpXorErasure
+#   S = 4: ReedSolomon
 
 # 5개 전략 전체 순차 실행 (각 10분)
 bash run_all_tests.sh

@@ -28,6 +28,12 @@ namespace UltraSudoku
 
         public static async Task Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "bench")
+            {
+                Benchmark.Run();
+                return;
+            }
+
             int durationSeconds = 0;
             if (args.Length > 0 && int.TryParse(args[0], out int minutes) && minutes > 0)
             {
