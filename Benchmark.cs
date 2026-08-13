@@ -147,11 +147,44 @@ namespace UltraSudoku
             }
 
             Console.WriteLine();
+            Console.WriteLine("=== High-RTT First-Line Local Repair Simulation (10,000 Lost Chunks) ===");
+            Console.WriteLine($"{"Strategy",-16} {"Lost Chunks":>12} {"Locally Avoided":>16} {"Avoidance Rate":>16}");
+            Console.WriteLine(new string('-', 64));
+
+            const int SimulateLostChunks = 10_000;
+            foreach (var spec in specs)
+            {
+                IRecoveryStrategy strat = spec.Factory();
+                int totalLost = 0;
+                int totalAvoided = 0;
+                for (int iter = 0; iter < SimulateLostChunks / (blankCount > 0 ? blankCount : 1); iter++)
+                {
+                    int slot = iter % SlotPool;
+                    strat.RegisterSession(slot, (uint)iter, GridSize, expectedSum, current, solution);
+                    // Send all packets except 1 random missing chunk per session
+                    for (int pk = 0; pk < packets.Length - 1; pk++)
+                    {
+                        var p = packets[pk]; p.SessionId = (uint)(iter & 0xFFFF);
+                        strat.ProcessPacket(slot, p);
+                    }
+                    totalLost += 1;
+                    int rec = strat.TryRecoverSession(slot, recoverBuf);
+                    if (rec > 0)
+                    {
+                        totalAvoided += rec;
+                    }
+                }
+                double rate = (double)totalAvoided / totalLost * 100.0;
+                Console.WriteLine($"{spec.Name,-16} {totalLost,12:N0} {totalAvoided,16:N0} {rate,15:F1}%");
+            }
+
+            Console.WriteLine();
             Console.WriteLine("Columns:");
-            Console.WriteLine("  Memory         — heap allocated at construction (GC delta, MB)");
-            Console.WriteLine("  Register       — RegisterSession ns/call");
-            Console.WriteLine("  ProcessPkt     — ProcessPacket ns/call (full hot path)");
-            Console.WriteLine("  TryRecover     — TryRecoverSession ns/call (1 missing cell)");
+            Console.WriteLine("  Memory          — Heap allocated at construction (GC delta, MB)");
+            Console.WriteLine("  Register        — RegisterSession ns/call");
+            Console.WriteLine("  ProcessPkt      — ProcessPacket ns/call (full hot path)");
+            Console.WriteLine("  TryRecover      — TryRecoverSession ns/call");
+            Console.WriteLine("  Avoidance Rate  — Retransmissions avoided locally before RTT penalty");
         }
     }
 }
