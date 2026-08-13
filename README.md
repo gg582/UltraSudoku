@@ -11,7 +11,7 @@ This project extracts structural invariants from traditional Korean mathematical
 1. **`HexagonalLatticeRecovery`** $\rightarrow$ Derived from **Jisu-gwimundo (지수귀문도, 地數龜文圖)**
    - Hexagonal lattice topology where overlapping 7-node hexagonal groups form ultra-fast local repair clusters (276 ns).
 2. **`KroneckerAntiDiagLatticeRecovery`** $\rightarrow$ Derived from **Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo (백자생성교수도 & 백자생성순수도, 百子生成交數圖 & 百子生成順數圖)**
-   - Paired Yin-Yang diagrams (음양 짝): 3x3 Kronecker palace hierarchy (Yang diagram) and anti-diagonal symmetry axes (Yin diagram) form a 3-tier LRC storage array topology (5.2 MB, 22 ns ingest).
+   - Paired 9x9 Yin-Yang diagrams (음양 짝): 3x3 Kronecker palace hierarchy (Yang diagram, 81 cells) and anti-diagonal symmetry axes (Yin diagram, 81 cells) applied to the 9x9 core region within the 10x10 puzzle grid, forming a 3-tier LRC storage array topology (5.2 MB, 22 ns ingest).
 
 ### Domain Separation & Categorization Matrix
 
@@ -23,7 +23,7 @@ Rather than forcing all historical diagram topologies into a single network FEC 
       ┌──────────────────────────────────────┼──────────────────────────────────────┐
       ▼                                      ▼                                      ▼
 [ Streaming / High-RTT FEC ]        [ Storage / RAID / LRC ]              [ Controls & Baselines ]
-  - HtpXorErasure (6-cell XOR)        - KroneckerAntiDiag (81-cell 9x9)     - MagicSquare (Negative Control)
+  - HtpXorErasure (6-cell XOR)        - KroneckerAntiDiag (81-cell 9x9 core) - MagicSquare (Negative Control)
   - Hexagonal (Jisu-gwimundo 276 ns)  - LRC / Distributed Parity            - BaselineVector / ReedSolomon (MDS)
 ```
 
@@ -31,7 +31,7 @@ Rather than forcing all historical diagram topologies into a single network FEC 
    - Small generation size (6-cell XOR partition). Rapid accumulation allows low-latency online streaming recovery without long framing delays.
 
 2. **`KroneckerAntiDiag` (Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo, 백자생성교수도 & 백자생성순수도) $\rightarrow$ Storage / Object Store / Local Reconstruction Codes (LRC)**
-   - **Generation size 81 (9x9 grid)** creates a decoding delay bottleneck in real-time streaming, but becomes a **hierarchical advantage for storage arrays**.
+   - **Generation size 81 (9x9 core within 10x10 grid)** creates a decoding delay bottleneck in real-time streaming, but becomes a **hierarchical advantage for storage arrays**.
    - **Asymmetric Asynchronous Cost**: `22 ns Write/Ingest Process` vs `998 ns Rebuild/Repair`. In RAID/LRC, normal writes/reads dominate ($>99\%$), making ultra-cheap normal-path updates (22 ns, 5.2 MB) ideal for storage controllers.
    - **3-Tier Failure Domain Hierarchy**:
      $$\text{3x3 Palace Local Repair} \longrightarrow \text{Anti-Diagonal Cross Group Repair} \longrightarrow \text{Global Parity Recovery}$$
@@ -45,14 +45,14 @@ Rather than forcing all historical diagram topologies into a single network FEC 
 
 ### Strategy Comparison Matrix
 
-| Strategy | Classical Origin (도상) | Primary Domain | Generation Size | Normal Write/Process | Rebuild/Repair Latency | Memory Footprint | Role |
-|----------|-----------------------|----------------|-----------------|----------------------|------------------------|------------------|------|
-| **BaselineVector** | — | Vector Math | 10 cells | 18 ns | 1,037 ns | 2.4 MB | Simple Vector Baseline |
-| **MagicSquare** | — | Negative Control | 100 cells | 17 ns | 1,039 ns | 7.7 MB | Regularity Control |
-| **Hexagonal** | Jisu-gwimundo (지수귀문도) | Local Repair Filter | 7 cells | 27 ns | **276 ns** | 30.5 MB | Fast First-Line Repair |
-| **HtpXorErasure** | Jisu-gwimundo (지수귀문도) | Streaming Network FEC | 6 cells | 67 ns | 350 ns | 34.8 MB | Online High-RTT FEC |
-| **ReedSolomon** | — | Global MDS Code | 6 cells | 78 ns | 370 ns | 34.7 MB | Algebraic Global Baseline |
-| **KroneckerAntiDiag** | Baekja-saengseong-gyosudo & Sunsudo (백자생성교수도 & 순수도) | Storage / RAID / LRC | 81 cells (9x9) | **22 ns** | 998 ns | **5.2 MB** | Hierarchical Array LRC |
+| Strategy | Classical Origin (도상) | Primary Domain | Generation / Grid Size | Normal Write/Process | Rebuild/Repair Latency | Memory Footprint | Role |
+|----------|-----------------------|----------------|------------------------|----------------------|------------------------|------------------|------|
+| **BaselineVector** | — | Vector Math | 10 cells (10x10) | 18 ns | 1,037 ns | 2.4 MB | Simple Vector Baseline |
+| **MagicSquare** | — | Negative Control | 100 cells (10x10) | 17 ns | 1,039 ns | 7.7 MB | Regularity Control |
+| **Hexagonal** | Jisu-gwimundo (지수귀문도) | Local Repair Filter | 7 cells (10x10) | 27 ns | **276 ns** | 30.5 MB | Fast First-Line Repair |
+| **HtpXorErasure** | Jisu-gwimundo (지수귀문도) | Streaming Network FEC | 6 cells (10x10) | 67 ns | 350 ns | 34.8 MB | Online High-RTT FEC |
+| **ReedSolomon** | — | Global MDS Code | 6 cells (10x10) | 78 ns | 370 ns | 34.7 MB | Algebraic Global Baseline |
+| **KroneckerAntiDiag** | Baekja-saengseong-gyosudo & Sunsudo (백자생성교수도 & 순수도) | Storage / RAID / LRC | 81 cells (9x9 core in 10x10) | **22 ns** | 998 ns | **5.2 MB** | Hierarchical Array LRC |
 
 ### Microbenchmark & Performance Verification
 
@@ -97,9 +97,9 @@ dotnet run -c Release --no-build -- 1 5
 본 프로젝트는 한국 고전 수학 도상(圖象) 전통에서 구조적 불변성을 추출하여 현대 이레이저 코딩 토폴로지로 재해석하였습니다:
 
 1. **`HexagonalLatticeRecovery`** $\rightarrow$ **지수귀문도 (地數龜文圖, Jisu-gwimundo)** 기반
-   - 육각형 상호 오버랩 격자 토폴로지. 7개 노드 그룹이 초고속 국소 복구 클러스터(276 ns)를 형성.
+   - 10×10 퍼즐 환경 내 육각형 상호 오버랩 격자 토폴로지. 7개 노드 그룹이 초고속 국소 복구 클러스터(276 ns)를 형성.
 2. **`KroneckerAntiDiagLatticeRecovery`** $\rightarrow$ **백자생성교수도 & 백자생성순수도 (百子生成交數圖 & 百子生成順數圖, Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo)** 기반
-   - 음양 짝(Yin-Yang pair) 도상: 3×3 궁 크로네커 곱 분해(양도, 백자생성교수도) 및 반대각 대칭 축(음도, 백자생성순수도)이 3단계 계층형 LRC 스토리지 어레이 토폴로지(5.2 MB, 22 ns 쓰기 수신)를 형성.
+   - 음양 짝(Yin-Yang pair) 도상: 10×10 퍼즐의 9×9 핵심 영역에 3×3 궁 크로네커 곱 분해(양도 81셀, 백자생성교수도) 및 반대각 대칭 축(음도 81셀, 백자생성순수도)을 적용하여 3단계 계층형 LRC 스토리지 어레이 토폴로지(5.2 MB, 22 ns 쓰기 수신)를 형성.
 
 ### 도메인 분리 및 역할 정의 (Domain Separation Matrix)
 
@@ -119,7 +119,7 @@ dotnet run -c Release --no-build -- 1 5
    - 작은 세대 크기 (6셀 분할 XOR 그룹). 프레이밍 지연 없는 빠른 누적으로 실시간 온라인 스트리밍 패킷 복구에 적합.
 
 2. **`KroneckerAntiDiag` (백자생성교수도 & 백자생성순수도, Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo) $\rightarrow$ 스토리지 / 객체 저장소 / 지역 복구 코드 (LRC)**
-   - **Generation Size 81 (9×9)**: 실시간 스트리밍에서는 축적 지연이 발생하지만, **스토리지 어레이(RAID/LRC)에서는 계층적 구조의 이점**이 됨.
+   - **Generation Size 81 (10×10 격자 내 9×9 핵심 영역)**: 실시간 스트리밍에서는 축적 지연이 발생하지만, **스토리지 어레이(RAID/LRC)에서는 계층적 구조의 이점**이 됨.
    - **비대칭 비동기 비용**: `22 ns 정상 쓰기(Ingest)` vs `998 ns 장애 복구(Rebuild)`. 정상 입출력이 99% 이상인 저장장치 특성상 22 ns / 5.2 MB의 캐시 친화적 정상 경로가 극히 유리함.
    - **3단계 장애 도메인 계층**:
      $$\text{3×3 궁 현지 복구 (백자생성교수도)} \longrightarrow \text{반대각 교차 그룹 복구 (백자생성순수도)} \longrightarrow \text{전역 패리티 복구}$$
@@ -133,14 +133,14 @@ dotnet run -c Release --no-build -- 1 5
 
 ### 전략별 비교 표 (Strategy Comparison Matrix)
 
-| 전략 | 고전 도상 출처 | 주요 적용 도메인 | 세대 크기 | 정상 쓰기/수신 속도 | 리빌드/복구 지연시간 | 메모리 점유량 | 역할 및 특징 |
-|------|--------------|----------------|----------|--------------------|--------------------|--------------|--------------|
-| **BaselineVector** | — | 벡터 합 수학 | 10 cells | 18 ns | 1,037 ns | 2.4 MB | 단순 벡터 기준선 |
-| **MagicSquare** | — | 음성 대조군 | 100 cells | 17 ns | 1,039 ns | 7.7 MB | 단순 정합성 대조군 |
-| **Hexagonal** | 지수귀문도 (Jisu-gwimundo) | 국소 복구 필터 | 7 cells | 27 ns | **276 ns** | 30.5 MB | 초고속 1차 현지 복구 |
-| **HtpXorErasure** | 지수귀문도 (Jisu-gwimundo) | 스트리밍 네트워크 FEC | 6 cells | 67 ns | 350 ns | 34.8 MB | 실시간 High-RTT FEC |
-| **ReedSolomon** | — | 전역 MDS 코딩 | 6 cells | 78 ns | 370 ns | 34.7 MB | 무거운 전역 대수 코딩 |
-| **KroneckerAntiDiag** | 백자생성교수도 & 백자생성순수도 (Baekja-saengseong) | 스토리지 / RAID / LRC | 81 cells (9x9) | **22 ns** | 998 ns | **5.2 MB** | 계층형 어레이 LRC |
+| 전략 | 고전 도상 출처 | 주요 적용 도메인 | 세대 및 격자 크기 | 정상 쓰기/수신 속도 | 리빌드/복구 지연시간 | 메모리 점유량 | 역할 및 특징 |
+|------|--------------|----------------|------------------|--------------------|--------------------|--------------|--------------|
+| **BaselineVector** | — | 벡터 합 수학 | 10 cells (10x10) | 18 ns | 1,037 ns | 2.4 MB | 단순 벡터 기준선 |
+| **MagicSquare** | — | 음성 대조군 | 100 cells (10x10) | 17 ns | 1,039 ns | 7.7 MB | 단순 정합성 대조군 |
+| **Hexagonal** | 지수귀문도 (Jisu-gwimundo) | 국소 복구 필터 | 7 cells (10x10) | 27 ns | **276 ns** | 30.5 MB | 초고속 1차 현지 복구 |
+| **HtpXorErasure** | 지수귀문도 (Jisu-gwimundo) | 스트리밍 네트워크 FEC | 6 cells (10x10) | 67 ns | 350 ns | 34.8 MB | 실시간 High-RTT FEC |
+| **ReedSolomon** | — | 전역 MDS 코딩 | 6 cells (10x10) | 78 ns | 370 ns | 34.7 MB | 무거운 전역 대수 코딩 |
+| **KroneckerAntiDiag** | 백자생성교수도 & 백자생성순수도 (Baekja-saengseong) | 스토리지 / RAID / LRC | 81 cells (10x10 내 9x9) | **22 ns** | 998 ns | **5.2 MB** | 계층형 어레이 LRC |
 
 ### 마이크로벤치마크 및 성능 검증 결과
 
