@@ -62,6 +62,7 @@ namespace UltraSudoku
                 ("Hexagonal     ", () => new HexagonalLatticeRecovery()),
                 ("HtpXorErasure ", () => new HtpXorErasureRecovery()),
                 ("ReedSolomon   ", () => new ReedSolomonRecovery()),
+                ("KroneckerLatt ", () => new KroneckerAntiDiagLatticeRecovery()),
             };
 
             Console.WriteLine($"{"Strategy",-16} {"Memory":>10} {"Register":>12} {"ProcessPkt":>12} {"TryRecover":>12}");

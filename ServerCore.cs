@@ -2019,6 +2019,419 @@ namespace UltraSudoku
         }
     }
 
+    public sealed class KroneckerAntiDiagLatticeRecovery : IRecoveryStrategy
+    {
+        public const int MaxSessions = 16384;
+        public const int MaxGridSize = 10;
+        public const int MaxGridCells = 100;
+        public const int PalaceCount = 9; // 3x3 palaces in Yang (Kronecker)
+
+        // 9x9 Yang Diagram (Kronecker Product of Luoshu)
+        private static readonly byte[] YangDiagram = new byte[81]
+        {
+            16, 36,  8, 36, 81, 18,  8, 18,  4,
+            12, 20, 28, 27, 45, 63,  6, 10, 14,
+            32,  4, 24, 72,  9, 54, 16,  2, 12,
+            12, 27,  6, 20, 45, 10, 28, 63, 14,
+             9, 15, 21, 15, 25, 35, 21, 35, 49,
+            24,  3, 18, 40,  5, 30, 56,  7, 42,
+            32, 72, 16,  4,  9,  2, 24, 54, 12,
+            24, 40, 56,  3,  5,  7, 18, 30, 42,
+            64,  8, 48,  8,  1,  6, 48,  6, 36
+        };
+
+        // 9x9 Yin Diagram (Anti-diagonal Symmetry)
+        private static readonly byte[] YinDiagram = new byte[81]
+        {
+             9,  8,  7,  6,  5, 54, 63, 72,  1,
+            18, 21, 14,  8, 10, 12,  6, 64, 72,
+            27, 24, 24, 12, 35, 18, 16,  6, 63,
+            36, 32, 28, 16, 20,  9, 18, 12, 54,
+            45, 30, 15, 40, 25, 20, 35, 10,  5,
+             4, 48, 42, 49, 40, 16, 12,  8,  6,
+             3, 56, 36, 42, 15, 28, 24, 14,  7,
+             2,  4, 56, 48, 30, 32, 24, 21,  8,
+            81,  2,  3,  4, 45, 36, 27, 18,  9
+        };
+
+        private static readonly byte[] CellToPalace = new byte[81];
+        private static readonly byte[] CellToAntiDiag = new byte[81];
+
+        static KroneckerAntiDiagLatticeRecovery()
+        {
+            for (int r = 0; r < 9; r++)
+            {
+                for (int c = 0; c < 9; c++)
+                {
+                    int idx = r * 9 + c;
+                    CellToPalace[idx] = (byte)((r / 3) * 3 + (c / 3));
+                    CellToAntiDiag[idx] = (byte)Math.Abs(r + c - 8);
+                }
+            }
+        }
+
+        private readonly uint[] _expectedSums;
+        private readonly int[] _gridSizes;
+        private readonly uint[] _sessionIdMap;
+        private readonly ulong[] _blankCellMaskLow;
+        private readonly ulong[] _blankCellMaskHigh;
+        private readonly ulong[] _arrivedMaskLow;
+        private readonly ulong[] _arrivedMaskHigh;
+        private readonly uint[] _rowSums;
+        private readonly uint[] _colSums;
+        private readonly uint[] _diagSums;
+        private readonly uint[] _antiDiagSums;
+        private readonly byte[] _rowCounts;
+        private readonly byte[] _colCounts;
+        private readonly byte[] _diagCounts;
+        private readonly byte[] _antiDiagCounts;
+
+        // Yang Kronecker 3x3 Palace XOR Parity
+        private readonly uint[] _yangPalaceExpectedParity;
+        private readonly uint[] _yangPalaceCurrentParity;
+        private readonly byte[] _yangPalaceCounts;
+        private readonly byte[] _yangPalaceGroupSizes;
+
+        // Yin Anti-Diagonal Symmetry Group XOR Parity
+        private readonly uint[] _yinAntiDiagExpectedParity;
+        private readonly uint[] _yinAntiDiagCurrentParity;
+        private readonly byte[] _yinAntiDiagCounts;
+        private readonly byte[] _yinAntiDiagGroupSizes;
+
+        public KroneckerAntiDiagLatticeRecovery()
+        {
+            int s = MaxSessions;
+            int v = MaxSessions * MaxGridSize;
+            int p = MaxSessions * PalaceCount;
+            int ad = MaxSessions * 9;
+
+            _expectedSums = new uint[s];
+            _gridSizes = new int[s];
+            _sessionIdMap = new uint[s];
+            _blankCellMaskLow = new ulong[s];
+            _blankCellMaskHigh = new ulong[s];
+            _arrivedMaskLow = new ulong[s];
+            _arrivedMaskHigh = new ulong[s];
+            _rowSums = new uint[v];
+            _colSums = new uint[v];
+            _diagSums = new uint[s];
+            _antiDiagSums = new uint[s];
+            _rowCounts = new byte[v];
+            _colCounts = new byte[v];
+            _diagCounts = new byte[s];
+            _antiDiagCounts = new byte[s];
+
+            _yangPalaceExpectedParity = new uint[p];
+            _yangPalaceCurrentParity = new uint[p];
+            _yangPalaceCounts = new byte[p];
+            _yangPalaceGroupSizes = new byte[p];
+
+            _yinAntiDiagExpectedParity = new uint[ad];
+            _yinAntiDiagCurrentParity = new uint[ad];
+            _yinAntiDiagCounts = new byte[ad];
+            _yinAntiDiagGroupSizes = new byte[ad];
+        }
+
+        public void RegisterSession(int slotIndex, uint sessionId, int gridSize, uint expectedSum, ReadOnlySpan<byte> currentGrid, ReadOnlySpan<byte> solutionGrid)
+        {
+            _sessionIdMap[slotIndex] = sessionId;
+            _expectedSums[slotIndex] = expectedSum;
+            _gridSizes[slotIndex] = gridSize;
+            _blankCellMaskLow[slotIndex] = 0;
+            _blankCellMaskHigh[slotIndex] = 0;
+            _arrivedMaskLow[slotIndex] = 0;
+            _arrivedMaskHigh[slotIndex] = 0;
+            int cells = gridSize * gridSize;
+            for (int i = 0; i < cells; i++)
+            {
+                if (currentGrid[i] == 0)
+                {
+                    if (i < 64)
+                        _blankCellMaskLow[slotIndex] |= (1UL << i);
+                    else
+                        _blankCellMaskHigh[slotIndex] |= (1UL << (i - 64));
+                }
+            }
+
+            int vBase = slotIndex * MaxGridSize;
+            for (int r = 0; r < gridSize; r++)
+            {
+                _rowSums[vBase + r] = 0;
+                _rowCounts[vBase + r] = 0;
+            }
+            for (int c = 0; c < gridSize; c++)
+            {
+                _colSums[vBase + c] = 0;
+                _colCounts[vBase + c] = 0;
+            }
+            _diagSums[slotIndex] = 0;
+            _antiDiagSums[slotIndex] = 0;
+            _diagCounts[slotIndex] = 0;
+            _antiDiagCounts[slotIndex] = 0;
+
+            int pBase = slotIndex * PalaceCount;
+            for (int g = 0; g < PalaceCount; g++)
+            {
+                _yangPalaceExpectedParity[pBase + g] = 0;
+                _yangPalaceCurrentParity[pBase + g] = 0;
+                _yangPalaceCounts[pBase + g] = 0;
+                _yangPalaceGroupSizes[pBase + g] = 0;
+            }
+
+            int adBase = slotIndex * 9;
+            for (int g = 0; g < 9; g++)
+            {
+                _yinAntiDiagExpectedParity[adBase + g] = 0;
+                _yinAntiDiagCurrentParity[adBase + g] = 0;
+                _yinAntiDiagCounts[adBase + g] = 0;
+                _yinAntiDiagGroupSizes[adBase + g] = 0;
+            }
+
+            for (int r = 0; r < gridSize; r++)
+            {
+                for (int c = 0; c < gridSize; c++)
+                {
+                    int i = r * gridSize + c;
+                    if (currentGrid[i] == 0)
+                    {
+                        if (r < 9 && c < 9)
+                        {
+                            int idx = r * 9 + c;
+                            int palace = CellToPalace[idx];
+                            _yangPalaceExpectedParity[pBase + palace] ^= (uint)(solutionGrid[i] ^ YangDiagram[idx]);
+                            _yangPalaceGroupSizes[pBase + palace]++;
+
+                            int adGroup = CellToAntiDiag[idx];
+                            _yinAntiDiagExpectedParity[adBase + adGroup] ^= (uint)(solutionGrid[i] ^ YinDiagram[idx]);
+                            _yinAntiDiagGroupSizes[adBase + adGroup]++;
+                        }
+                    }
+                }
+            }
+        }
+
+        public void ProcessPacket(int slotIndex, MovePacket packet)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            int linearIdx = packet.Row * gridSize + packet.Col;
+            ulong blankBit = linearIdx < 64
+                ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (blankBit == 0)
+                return;
+            ulong arrivedBit = linearIdx < 64
+                ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (arrivedBit != 0)
+                return;
+
+            if (linearIdx < 64)
+                _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+            else
+                _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+            int vBase = slotIndex * MaxGridSize;
+            _rowSums[vBase + packet.Row] += packet.Value;
+            _rowCounts[vBase + packet.Row]++;
+            _colSums[vBase + packet.Col] += packet.Value;
+            _colCounts[vBase + packet.Col]++;
+            if (packet.Row == packet.Col)
+            {
+                _diagSums[slotIndex] += packet.Value;
+                _diagCounts[slotIndex]++;
+            }
+            if (packet.Row + packet.Col == gridSize - 1)
+            {
+                _antiDiagSums[slotIndex] += packet.Value;
+                _antiDiagCounts[slotIndex]++;
+            }
+
+            if (packet.Row < 9 && packet.Col < 9)
+            {
+                int idx = packet.Row * 9 + packet.Col;
+                int palace = CellToPalace[idx];
+                int pBase = slotIndex * PalaceCount;
+                _yangPalaceCurrentParity[pBase + palace] ^= (uint)(packet.Value ^ YangDiagram[idx]);
+                _yangPalaceCounts[pBase + palace]++;
+
+                int adGroup = CellToAntiDiag[idx];
+                int adBase = slotIndex * 9;
+                _yinAntiDiagCurrentParity[adBase + adGroup] ^= (uint)(packet.Value ^ YinDiagram[idx]);
+                _yinAntiDiagCounts[adBase + adGroup]++;
+            }
+        }
+
+        public int TryRecoverSession(int slotIndex, Span<MovePacket> outputBuffer)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            uint expectedSum = _expectedSums[slotIndex];
+            int vBase = slotIndex * MaxGridSize;
+            uint sessionId = _sessionIdMap[slotIndex];
+            int pBase = slotIndex * PalaceCount;
+            int adBase = slotIndex * 9;
+            int totalRecovered = 0;
+            bool found;
+
+            do
+            {
+                found = false;
+                for (int linearIdx = 0; linearIdx < gridSize * gridSize; linearIdx++)
+                {
+                    ulong blankBit = linearIdx < 64
+                        ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (blankBit == 0)
+                        continue;
+                    ulong arrivedBit = linearIdx < 64
+                        ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (arrivedBit != 0)
+                        continue;
+
+                    int row = linearIdx / gridSize;
+                    int col = linearIdx % gridSize;
+                    uint candidate = 0;
+                    bool hasCandidate = false;
+
+                    if (row < 9 && col < 9)
+                    {
+                        int idx = row * 9 + col;
+                        int palace = CellToPalace[idx];
+                        if (_yangPalaceGroupSizes[pBase + palace] > 0 &&
+                            _yangPalaceCounts[pBase + palace] == _yangPalaceGroupSizes[pBase + palace] - 1)
+                        {
+                            uint diff = _yangPalaceExpectedParity[pBase + palace] ^ _yangPalaceCurrentParity[pBase + palace];
+                            uint cand = diff ^ YangDiagram[idx];
+                            if (!hasCandidate)
+                            {
+                                candidate = cand;
+                                hasCandidate = true;
+                            }
+                        }
+
+                        int adGroup = CellToAntiDiag[idx];
+                        if (_yinAntiDiagGroupSizes[adBase + adGroup] > 0 &&
+                            _yinAntiDiagCounts[adBase + adGroup] == _yinAntiDiagGroupSizes[adBase + adGroup] - 1)
+                        {
+                            uint diff = _yinAntiDiagExpectedParity[adBase + adGroup] ^ _yinAntiDiagCurrentParity[adBase + adGroup];
+                            uint cand = diff ^ YinDiagram[idx];
+                            if (!hasCandidate)
+                            {
+                                candidate = cand;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != cand)
+                            {
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (!hasCandidate)
+                    {
+                        int rowCount = _rowCounts[vBase + row];
+                        if (rowCount == gridSize - 1)
+                        {
+                            candidate = expectedSum - _rowSums[vBase + row];
+                            hasCandidate = true;
+                        }
+
+                        int colCount = _colCounts[vBase + col];
+                        if (colCount == gridSize - 1)
+                        {
+                            uint cc = expectedSum - _colSums[vBase + col];
+                            if (!hasCandidate)
+                            {
+                                candidate = cc;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != cc)
+                            {
+                                continue;
+                            }
+                        }
+
+                        if (row == col && _diagCounts[slotIndex] == gridSize - 1)
+                        {
+                            uint dc = expectedSum - _diagSums[slotIndex];
+                            if (!hasCandidate)
+                            {
+                                candidate = dc;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != dc)
+                            {
+                                continue;
+                            }
+                        }
+
+                        if (row + col == gridSize - 1 && _antiDiagCounts[slotIndex] == gridSize - 1)
+                        {
+                            uint ac = expectedSum - _antiDiagSums[slotIndex];
+                            if (!hasCandidate)
+                            {
+                                candidate = ac;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != ac)
+                            {
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (hasCandidate && candidate > 0 && candidate <= 255)
+                    {
+                        if (linearIdx < 64)
+                            _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+                        else
+                            _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+                        _rowSums[vBase + row] += candidate;
+                        _rowCounts[vBase + row]++;
+                        _colSums[vBase + col] += candidate;
+                        _colCounts[vBase + col]++;
+                        if (row == col)
+                        {
+                            _diagSums[slotIndex] += candidate;
+                            _diagCounts[slotIndex]++;
+                        }
+                        if (row + col == gridSize - 1)
+                        {
+                            _antiDiagSums[slotIndex] += candidate;
+                            _antiDiagCounts[slotIndex]++;
+                        }
+
+                        if (row < 9 && col < 9)
+                        {
+                            int idx = row * 9 + col;
+                            int palace = CellToPalace[idx];
+                            _yangPalaceCurrentParity[pBase + palace] ^= (uint)(candidate ^ YangDiagram[idx]);
+                            _yangPalaceCounts[pBase + palace]++;
+
+                            int adGroup = CellToAntiDiag[idx];
+                            _yinAntiDiagCurrentParity[adBase + adGroup] ^= (uint)(candidate ^ YinDiagram[idx]);
+                            _yinAntiDiagCounts[adBase + adGroup]++;
+                        }
+
+                        outputBuffer[totalRecovered++] = new MovePacket
+                        {
+                            SessionId = sessionId,
+                            Row = (byte)row,
+                            Col = (byte)col,
+                            Value = (byte)candidate
+                        };
+                        found = true;
+                        if (totalRecovered >= outputBuffer.Length)
+                            break;
+                    }
+                }
+            }
+            while (found && totalRecovered < outputBuffer.Length);
+            return totalRecovered;
+        }
+    }
+
     public sealed class GameSessionManager
     {
         public const int MaxSessions = 16384;
