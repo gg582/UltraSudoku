@@ -12,7 +12,7 @@ This project extracts structural invariants from traditional Korean mathematical
    - Hexagonal lattice topology where overlapping 7-node hexagonal groups form ultra-fast local repair clusters (276 ns).
 2. **`KroneckerAntiDiagLatticeRecovery`** $\rightarrow$ Derived from **Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo (백자생성교수도 & 백자생성순수도, 百子生成交數圖 & 百子生成順數圖)**
    - Paired Yin-Yang 9x9 diagrams (음양 짝):
-     - **Yang Diagram (백자생성교수도)**: 3x3 Kronecker sub-grid / block partition hierarchy ($L \otimes L$) forming 9 local sub-grid parity groups.
+     - **Yang Diagram (백자생성교수도)**: 3x3 Magic Square Kronecker sub-grid / block partition hierarchy ($L \otimes L$) forming 9 local sub-grid parity groups.
      - **Yin Diagram (백자생성순수도)**: Anti-diagonal symmetry groups forming orthogonal cross-block parity groups.
    - Applied to the 81-cell core region, creating a 3-tier LRC storage array topology (5.2 MB memory, 22 ns write ingest).
 
@@ -104,7 +104,7 @@ dotnet run -c Release --no-build -- 1 5
    - 육각형 상호 오버랩 격자 토폴로지. 7개 노드 그룹이 초고속 국소 복구 클러스터(276 ns)를 형성.
 2. **`KroneckerAntiDiagLatticeRecovery`** $\rightarrow$ **백자생성교수도 & 백자생성순수도 (百子生成交數圖 & 百子生成順數圖, Baekja-saengseong-gyosudo & Baekja-saengseong-sunsudo)** 기반
    - 음양 짝(Yin-Yang pair) 9×9 도상:
-     - **양도 (백자생성교수도)**: 낙서의 3×3 자기 크로네커 곱($L \otimes L$) 분해로 9개 서브그리드/블록 파티션(Sub-grid / Block partition) 국소 패리티 그룹 형성.
+     - **양도 (백자생성교수도)**: 3×3 마방진의 자기 크로네커 곱($L \otimes L$) 분해로 9개 서브그리드/블록 파티션(Sub-grid / Block partition) 국소 패리티 그룹 형성.
      - **음도 (백자생성순수도)**: 반대각선 대칭 축으로 블록 간 교차 직교(Cross-block orthogonal) 패리티 그룹 형성.
    - 81셀 영역에 적용하여 3단계 계층형 LRC 스토리지 어레이 토폴로지(5.2 MB 메모리, 22 ns 쓰기 수신)를 구축함.
 
