@@ -4,11 +4,14 @@
 
 A lock-free, zero-allocation C# network simulation comparing six packet-recovery strategies under 10% drop / 5% corruption scenarios.
 
-### Architectural Motivation: Algorithmic Exaptation of Historical Lattices
+### Architectural Motivation: Algorithmic Exaptation & Trade-off Shift
 
 This project is an engineering attempt to **extract and exploit spatial topology mechanisms** from classical mathematical diagrams (specifically the 9x9 Kronecker Product and Anti-Diagonal Symmetry diagrams) to solve modern network erasure problems.
 
-By replacing expensive Galois Field GF(2^8) arithmetic with hierarchical 3x3 Kronecker palace partitions and anti-diagonal orthogonal symmetry groups, we achieve high-rate erasure recovery using pure bitwise XOR operations within a 5.2 MB cache-friendly footprint.
+Our empirical findings demonstrate a structural trade-off shift:
+- **Naive Grid Regularity (`MagicSquare`) is ineffective**: Serves as a Negative Control. Raw grid regularity or number patterns yield no recovery advantage (2.39% vs 2.44% baseline).
+- **Extracted Structural Invariants + Modern XOR (`KroneckerAntiDiag`)**: Transforming 3x3 Kronecker palace partitioning and anti-diagonal symmetry into data dependency graphs yields a distinct Pareto frontier:
+  $$\text{Cheap Ingest (22 ns) + Compact Memory (5.2 MB) } \leftrightarrow \text{ Higher Deferred Repair Latency (998 ns)}$$
 
 ### Architecture & Components
 
@@ -23,7 +26,7 @@ All synchronization uses `System.Threading.Interlocked` only. The hot loop alloc
 | Strategy | Description & Topology |
 |----------|-----------------------|
 | **BaselineVectorRecovery** | Row / column / diagonal / anti-diagonal sum constraints. Recovers when exactly one node is missing in a vector (`candidate = expectedSum - vectorSum`). No validation. |
-| **MagicSquareRecovery** | Baseline logic **plus** 3 bitmask uniqueness constraints (row, column, lattice). Serves as a negative control proving that magic-square regularity alone does not yield packet recovery. |
+| **MagicSquareRecovery** | Baseline logic **plus** 3 bitmask uniqueness constraints. Serves as a Negative Control proving that grid regularity alone yields no recovery advantage. |
 | **HexagonalLatticeRecovery** | Overlapping 7-member interior hexagonal groups (center + 6 neighbors). Serves as a fast local repair topology (276 ns). |
 | **HtpXorErasureRecovery** | Hexagonal groups **plus** XOR-parity erasure coding (6-cell partition groups). |
 | **ReedSolomonRecovery** | Hexagonal groups **plus** GF(2^8) Vandermonde erasure coding (`⊕ value * alpha^pos`). |
@@ -31,9 +34,9 @@ All synchronization uses `System.Threading.Interlocked` only. The hot loop alloc
 
 ### Performance & Metric Definitions
 
-> **Metric Definitions**:
+> **Metric Definitions & Analysis Requirements**:
 > - **Recovery Amplification Ratio (%)**: `Total Network Recovery Operations / Raw Packet Drop Count`
->   - Ratios > 100% occur because Forward Error Correction (FEC) strategies intercept and repair corrupted packets (wrong payload value) in addition to dropped packets.
+>   - Ratios > 100% occur because Forward Error Correction (FEC) strategies intercept and repair corrupted packets in addition to dropped packets, as well as cascading internal multi-path recoveries.
 > - **Net Recovery Rate**: `(Unique Original Packets Restored) / (Unique Packets Lost)` (strictly ≤ 100%).
 
 #### 1-Minute Stress Test Results
@@ -61,22 +64,20 @@ Measured on a 10x10 grid with 10,000 sessions (JIT-warmed):
 | **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns |
 | **KroneckerAntiDiag** | **5.2 MB** | 2,394 ns | **22 ns** | 998 ns |
 
-### Key Findings & Engineering Trade-offs
+### Key Findings & Engineering Pareto Points
 
-1. **Algorithmic Exaptation (`KroneckerAntiDiagLatticeRecovery`)**
-   - By borrowing the 3x3 Kronecker palace division and anti-diagonal symmetry axes, we obtain orthogonal parity groups without GF(2^8) lookup tables.
-   - Requires only **5.2 MB** of memory (fitting fully in L3 cache), compared to 34.7 MB for Reed-Solomon.
-   - Ingest latency per packet is **22 ns** (72% faster than Reed-Solomon's 78 ns).
+1. **Different Pareto Point via Classical Topology (`KroneckerAntiDiag`)**
+   - **Cost Shift**: `Cheap Ingest (22 ns) + Compact Memory (5.2 MB) <-> Expensive Deferred Recovery (998 ns)`.
+   - Replaces GF(2^8) math with cache-resident XOR topology, lowering per-packet ingest latency from 78 ns (RS) to 22 ns and memory from 34.7 MB to 5.2 MB.
 
-2. **HtpXorErasure vs ReedSolomon**
-   - Both achieve equivalent recovery performance (~184% amplification).
-   - HtpXorErasure offers faster local operations (`ProcessPacket` 67 ns vs 78 ns; `TryRecover` 350 ns vs 370 ns) and higher session wins (`Won`: 38 vs 35), showing topological robustness under spatial loss patterns.
+2. **Negative Control Insight (`MagicSquare`)**
+   - $\text{Old Diagram} \not\Rightarrow \text{Useful Coding}$.
+   - $\text{Extracted Structural Invariants} + \text{Modern XOR} \Rightarrow \text{Useful Pareto Trade-off}$.
 
-3. **MagicSquare as a Negative Control**
-   - Proves that grid regularity alone does not yield packet recovery (2.39% vs 2.44% baseline). Regularity is useless for error correction unless engineered into explicit parity topologies.
-
-4. **Hexagonal Local Repair**
-   - Fast local repair layer (`TryRecoverSession` 276 ns, 3.7x faster than Baseline). Ideal as a first-stage filter in multi-tier recovery architectures.
+3. **Planned Verification Roadmap**
+   - **Net Recovery Rate Normalization**: Explicit tracking of unique original restored vs lost packets.
+   - **Normalized Win Rate**: `Won / Sessions Attempted`.
+   - **Deterministic Seeded Deterministic Workload**: Testing with locked seeds across uniform, burst, rectangular, and adversarial loss patterns.
 
 ### Build & Run
 
@@ -87,7 +88,6 @@ make
 dotnet run -c Release --no-build -- bench
 
 # Stress Test (Duration, StrategyIndex)
-# S = 0: Baseline, 1: MagicSquare, 2: Hexagonal, 3: HtpXorErasure, 4: ReedSolomon, 5: KroneckerAntiDiag
 dotnet run -c Release --no-build -- 1 5
 ```
 
@@ -97,11 +97,14 @@ dotnet run -c Release --no-build -- 1 5
 
 10% 드롭 및 5% 패킷 손상(Corruption) 환경에서 6가지 네트워크 패킷 복구 전략의 성능, 메모리 풋프린트, 연산 부하 트레이드오프를 비교 분석하는 락-프리(Lock-free), 제로-할당(Zero-allocation) C# 네트워크 시뮬레이션입니다.
 
-### 동기 및 기술적 의의: 고전 격자 도상의 알고리즘적 차용 (Algorithmic Exaptation)
+### 동기 및 기술적 의의: 파레토 포인트 이동 (Pareto Point Shift)
 
-본 프로젝트는 민속학적 탐구(Ethnocomputing)에 그치지 않고, **고전 수학 도상(9×9 구구자수변궁 양도 및 음도)의 공간적 대칭성과 계층 구조**를 현대 네트워크 패킷 이레이저 코딩(Erasure Coding) 문제 해결에 직접 차용(Exaptation)하는 엔지니어링 실용성을 목표로 합니다.
+본 프로젝트는 고전 도상의 단순 수치나 마방진 성질을 컴퓨터에 적용하는 민속학적 탐구가 아닙니다.
 
-비싼 Galois Field GF(2^8) 유한체 연산 대신, **3×3 궁(Palace) 크로네커 곱 파티션**과 **반대각 직교 대칭 축(Anti-diagonal Symmetry Group)**을 활용하여 5.2 MB의 L3 캐시 친화적 메모리 풋프린트와 순수 비트 XOR 연산만으로 고성능 패킷 복구 시스템을 구현했습니다.
+실험 데이터는 다음을 명확히 증명합니다:
+1. **단순 방진 정합성(`MagicSquare`)의 실패**: 방진의 숫자 배열이나 고유성 규칙만 적용한 경우 복구율 향상이 전혀 없음 (2.39% vs 2.44% 대조군).
+2. **구조적 불변성 추출 및 현대 XOR 합성(`KroneckerAntiDiag`)**: 3×3 궁 크로네커 곱 파티션과 반대각 대칭 구조를 데이터 의존관계로 재해석했을 때 비로소 RS와 명확히 다른 새로운 파레토 포인트(Pareto Point)가 형성됨:
+   $$\text{싸고 빠른 패킷 수신 (22 ns) + 컴팩트 메모리 (5.2 MB)} \leftrightarrow \text{복구 시점 비용 지불 (998 ns)}$$
 
 ### 시스템 아키텍처 및 구성요소
 
@@ -115,18 +118,17 @@ dotnet run -c Release --no-build -- 1 5
 
 | 전략 | 토폴로지 및 동작 원리 |
 |------|----------------------|
-| **BaselineVectorRecovery** | 행 / 열 / 대각선 / 역대각선 합 제약 조건. 벡터 내 단일 노드 결손 시 단순 산술 차이 복구 (`candidate = expectedSum - vectorSum`). 검증 로직 없음. |
-| **MagicSquareRecovery** | 베이스라인 + 3중 비트마스크 고유성 제약 조건 (행, 열, 전체 격자). 방진의 고유성만으로는 단순 패킷 복구율이 상승하지 않음을 증명하는 대조군 (Negative Control). |
-| **HexagonalLatticeRecovery** | 7개 멤버로 구성된 오버랩 육각형 그룹 (중심 + 6개 이웃). 초고속 국소 복구 레이어 (276 ns). |
+| **BaselineVectorRecovery** | 행 / 열 / 대각선 / 역대각선 합 제약 조건. 단일 결손 시 단순 산술 차이 복구. |
+| **MagicSquareRecovery** | 베이스라인 + 3중 비트마스크 고유성 제약 조건. 단순 방진 정합성만으로는 복구 이득이 없음을 밝히는 음성 대조군(Negative Control). |
+| **HexagonalLatticeRecovery** | 7개 멤버 오버랩 육각형 그룹. 초고속 국소 복구 레이어 (276 ns). |
 | **HtpXorErasureRecovery** | 육각형 그룹 + 6셀 분할 XOR 패리티 이레이저 코딩. |
-| **ReedSolomonRecovery** | 육각형 그룹 + GF(2^8) 반데르몽드(Vandermonde) 이레이저 코딩 (`⊕ value * alpha^pos`). |
+| **ReedSolomonRecovery** | 육각형 그룹 + GF(2^8) 반데르몽드(Vandermonde) 이레이저 코딩. |
 | **KroneckerAntiDiagLatticeRecovery** | **도상 구조 차용 전략**: 3×3 궁 크로네커 곱 분해 (양도) + 반대각 직교 대칭 그룹 (음도) 가중 XOR 패리티. |
 
 ### 주요 지표 정의 (Metric Definitions)
 
-> **지표 명확화**:
-> - **복구 증폭 비율 (Amplification Ratio, %)**: `총 네트워크 복구 연산 수 / 원시 패킷 드롭 수`
->   - FEC(순방향 오류 수정) 기반 전략(HtpXor, ReedSolomon, KroneckerAntiDiag)은 손실(Dropped) 패킷뿐만 아니라 잘못된 값이 전달된 손상(Corrupted) 패킷까지 포획하여 복원하므로 증폭 비율이 100%를 초과할 수 있습니다.
+> **지표 명확화 및 향후 분석 항목**:
+> - **복구 증폭 비율 (Amplification Ratio, %)**: `총 네트워크 복구 연산 수 / 원시 패킷 드롭 수` (FEC 및 쇄도적 다중 경로 복구가 포함된 연산 비율).
 > - **순수 복구율 (Net Recovery Rate)**: `(복구된 유일 원본 패킷) / (손실된 유일 원본 패킷)` (엄격히 ≤ 100%).
 
 #### 1분 스트레스 테스트 결과
@@ -154,22 +156,20 @@ dotnet run -c Release --no-build -- 1 5
 | **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns |
 | **KroneckerAntiDiag** | **5.2 MB** | 2,394 ns | **22 ns** | 998 ns |
 
-### 주요 탐구 결과 및 엔지니어링 트레이드오프
+### 주요 탐구 결과 및 엔지니어링 파레토 포인트 분석
 
-1. **격자 토폴로지의 알고리즘적 차용 (`KroneckerAntiDiagLatticeRecovery`)**
-   - 3×3 궁 분해와 반대각 대칭 축을 차용하여 Galois Field 연산 표 없이 직교 패리티 그룹을 형성함.
-   - Reed-Solomon(34.7 MB) 대비 **5.2 MB의 캐시 친화적 메모리**만 사용하며 L3 캐시 내부에서 모든 처리가 완성됨.
-   - 패킷 수신당 처리 오버헤드가 **22 ns**로 Reed-Solomon(78 ns) 대비 약 72% 빠름.
+1. **고전 토폴로지 차용을 통한 파레토 포인트 이동 (`KroneckerAntiDiag`)**
+   - **비용 구조의 이동**: `저렴한 패킷 인제스트 (22 ns) + 컴팩트 메모리 (5.2 MB) <-> 복구 시점의 연산 비용 지불 (998 ns)`
+   - RS 대비 메모리는 34.7 MB에서 5.2 MB로 절감하고 수신 속도는 78 ns에서 22 ns로 단축시켰으나, 지연된 복구 연산 시 비용을 더 지불함.
 
-2. **HtpXorErasure vs ReedSolomon 비용 구조 분석**
-   - 두 기법 모두 대등한 복구 증폭 수준(~184%)을 달성함.
-   - HtpXorErasure는 패킷당 국소 처리 속도가 더 빠르고(`ProcessPacket` 67 ns vs 78 ns), 공간적 손실 패턴에서의 강건성(`Won` 38 vs 35)을 보임.
+2. **Negative Control의 교훈 (`MagicSquare`)**
+   - $\text{고전 도상} \not\Rightarrow \text{유용한 코딩}$.
+   - $\text{구조적 불변성 추출} + \text{현대적 XOR 패리티} \Rightarrow \text{유의미한 파레토 트레이드오프}$.
 
-3. **MagicSquare 대조군 (Negative Control)**
-   - 방진 자체의 정합성 규칙만으로는 복구 증대가 일어나지 않음을 증명 (2.39% vs 2.44%). 명시적인 패리티 토폴로지와 결합될 때만 의미를 가짐.
-
-4. **Hexagonal 국소 복구 레이어**
-   - 276 ns의 가장 빠른 복구 속도를 바탕으로 계층형 복구 아키텍처의 1차 필터로 적합함.
+3. **향후 검증 고도화 계획**
+   - **Net Recovery Rate 세분화**: 손실 원본 대비 유일 복원 비율 명시적 추적.
+   - **시도 대비 세션 완주율 정규화**: `Won / Sessions Attempted`.
+   - **고정 시드(Fixed Seed) 장애 시나리오**: Uniform, Burst, Rectangular, Adversarial loss 시나리오별 통제 비교.
 
 ### 빌드 및 실행 방법
 
@@ -180,6 +180,5 @@ make
 dotnet run -c Release --no-build -- bench
 
 # 부하 테스트 실행 (실행시간, 전략인덱스)
-# 인덱스: 0: Baseline, 1: MagicSquare, 2: Hexagonal, 3: HtpXorErasure, 4: ReedSolomon, 5: KroneckerAntiDiag
 dotnet run -c Release --no-build -- 1 5
 ```
