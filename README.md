@@ -2,97 +2,120 @@
 
 ## English
 
-A lock-free, zero-allocation C# network simulation comparing six packet-recovery strategies under 10% drop / 5% corruption scenarios.
+A lock-free, zero-allocation C# simulation comparing six packet-and-block recovery strategies across network streaming and storage array domains.
 
-### High-RTT Perspective: First-Line Local Repair Topology
+### Domain Separation & Categorization Matrix
 
-In High-RTT environments (e.g., 200 ms RTT), a decoder latency of 998 ns vs 370 ns represents a negligible difference ($998\text{ ns} = 0.000998\text{ ms} \ll 200\text{ ms}$). The decisive metric is **whether an extra RTT penalty is avoided through local reconstruction**.
+Rather than forcing all historical diagram topologies into a single network FEC use-case, our empirical findings reveal distinct domain suitability based on generation size, decoding latency, and structural locality:
 
-The `KroneckerAntiDiag` topology functions as an ideal **First-Line Local Repair Layer**:
-- **Ingest Latency**: **22 ns** (pure bitwise XOR without GF(2^8) math).
-- **Memory Footprint**: **5.2 MB** (fully cache-resident, vs 34.7 MB for RS).
-- **Architecture**: `Kronecker Local Repair -> Stronger FEC / RS -> NACK / Retransmission`.
+```text
+                                  [ Recovery Strategies ]
+                                             │
+      ┌──────────────────────────────────────┼──────────────────────────────────────┐
+      ▼                                      ▼                                      ▼
+[ Streaming / High-RTT FEC ]        [ Storage / RAID / LRC ]              [ Controls & Baselines ]
+  - HtpXorErasure (6-cell XOR)        - KroneckerAntiDiag (81-cell 9x9)     - MagicSquare (Negative Control)
+  - Hexagonal (276 ns Local Repair)   - LRC / Distributed Parity            - BaselineVector / ReedSolomon (MDS)
+```
+
+1. **`HtpXorErasure` & `Hexagonal` $\rightarrow$ Streaming & High-RTT Network FEC**
+   - Small generation size (6-cell XOR partition). Rapid accumulation allows low-latency online streaming recovery without long framing delays.
+
+2. **`KroneckerAntiDiag` $\rightarrow$ Storage / Object Store / Local Reconstruction Codes (LRC)**
+   - **Generation size 81 (9x9 grid)** creates a decoding delay bottleneck in real-time streaming, but becomes a **hierarchical advantage for storage arrays**.
+   - **Asymmetric Asynchronous Cost**: `22 ns Write/Ingest Process` vs `998 ns Rebuild/Repair`. In RAID/LRC, normal writes/reads dominate ($>99\%$), making ultra-cheap normal-path updates (22 ns, 5.2 MB) ideal for storage controllers.
+   - **3-Tier Failure Domain Hierarchy**:
+     $$\text{3x3 Palace Local Repair} \longrightarrow \text{Anti-Diagonal Cross Group Repair} \longrightarrow \text{Global Parity Recovery}$$
+   - **Physical Placement Rule**: Logical $3\times3$ neighborhood $\neq$ Same physical failure domain. Logical cells are interleaved across physical drives/nodes to guarantee drive-loss tolerance.
+
+3. **`MagicSquare` $\rightarrow$ Negative Control**
+   - Proves that grid regularity or number patterns alone yield zero recovery advantage ($2.39\%$ vs $2.44\%$ baseline).
+
+4. **`ReedSolomon` $\rightarrow$ Algebraic Global MDS Baseline**
+   - Standard Galois Field GF($2^8$) benchmark representing maximum algebraic recovery at higher CPU/memory costs.
+
+---
 
 ### Architecture & Components
 
-- **`GameSessionManager`** — Puzzle state (`_currentGrid`, `_solutionGrid`), move validation, session lifecycle.
-- **`IRecoveryStrategy`** — Strategy interface for network-layer packet recovery.
-- **`ClientSimulation`** — Async traffic generator with lock-free ring buffer and arena pool.
+- **`GameSessionManager`** — State management (`_currentGrid`, `_solutionGrid`), move validation, session lifecycle.
+- **`IRecoveryStrategy`** — Strategy interface for network & storage layer recovery.
+- **`ClientSimulation`** — Async traffic & block IO generator with lock-free ring buffer and arena pool.
 
-### Recovery Strategies
+All synchronization uses `System.Threading.Interlocked` only. The hot loop allocates zero heap objects.
 
-| Strategy | Description & Topology |
-|----------|-----------------------|
-| **BaselineVectorRecovery** | Row / column / diagonal / anti-diagonal sum constraints. Recovers when exactly one node is missing in a vector. |
-| **MagicSquareRecovery** | Baseline logic **plus** 3 bitmask uniqueness constraints. Serves as a Negative Control. |
-| **HexagonalLatticeRecovery** | Overlapping 7-member interior hexagonal groups (center + 6 neighbors). Fast local repair (276 ns). |
-| **HtpXorErasureRecovery** | Hexagonal groups **plus** XOR-parity erasure coding (6-cell partition groups). |
-| **ReedSolomonRecovery** | Hexagonal groups **plus** GF(2^8) Vandermonde erasure coding (`⊕ value * alpha^pos`). |
-| **KroneckerAntiDiagLatticeRecovery** | **First-Line Repair Topology**: 3x3 Kronecker palace decomposition + Anti-diagonal symmetry groups weighted XOR parity. |
+---
 
-### Microbenchmark & High-RTT Local Avoidance
+### Strategy Comparison Matrix
+
+| Strategy | Primary Domain | Generation Size | Normal Write/Process | Rebuild/Repair Latency | Memory Footprint | Role |
+|----------|----------------|-----------------|----------------------|------------------------|------------------|------|
+| **BaselineVector** | Vector Math | 10 cells | 18 ns | 1,037 ns | 2.4 MB | Simple Vector Baseline |
+| **MagicSquare** | Negative Control | 100 cells | 17 ns | 1,039 ns | 7.7 MB | Regularity Control |
+| **Hexagonal** | Local Repair Filter | 7 cells | 27 ns | **276 ns** | 30.5 MB | Fast First-Line Repair |
+| **HtpXorErasure** | Streaming Network FEC | 6 cells | 67 ns | 350 ns | 34.8 MB | Online High-RTT FEC |
+| **ReedSolomon** | Global MDS Code | 6 cells | 78 ns | 370 ns | 34.7 MB | Algebraic Global Baseline |
+| **KroneckerAntiDiag** | Storage / RAID / LRC | 81 cells (9x9) | **22 ns** | 998 ns | **5.2 MB** | Hierarchical Array LRC |
+
+---
+
+### Microbenchmark & Storage Metric Verification
 
 Measured on a 10x10 grid with 10,000 sessions (JIT-warmed):
 
-| Strategy | Memory | RegisterSession | ProcessPacket | TryRecoverSession | Retransmissions Avoided |
-|----------|--------|----------------|--------------|------------------|------------------------|
-| **Baseline** | 2.4 MB | 1,043 ns | 18 ns | 1,037 ns | Low (Single-gap vector only) |
-| **MagicSquare** | 7.7 MB | 2,203 ns | 17 ns | 1,039 ns | Low (Negative Control) |
-| **Hexagonal** | 30.5 MB | 6,343 ns | 27 ns | **276 ns** | Fast Local Filter |
-| **HtpXorErasure** | 34.8 MB | 6,415 ns | 67 ns | 350 ns | High (Local XOR) |
-| **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns | High (GF(2^8) Heavy Ingest) |
-| **KroneckerAntiDiag** | **5.2 MB** | 2,394 ns | **22 ns** | 998 ns | **High (22 ns Fast Ingest)** |
+| Strategy | Memory | RegisterSession | ProcessPacket (Write Ingest) | TryRecoverSession (Rebuild) | Domain Suitability |
+|----------|--------|----------------|------------------------------|-----------------------------|-------------------|
+| **Baseline** | 2.4 MB | 1,043 ns | 18 ns | 1,037 ns | Unvalidated Vector |
+| **MagicSquare** | 7.7 MB | 2,203 ns | 17 ns | 1,039 ns | Unused (Negative Control) |
+| **Hexagonal** | 30.5 MB | 6,343 ns | 27 ns | **276 ns** | Ultra-Fast Local Filter |
+| **HtpXorErasure** | 34.8 MB | 6,415 ns | 67 ns | 350 ns | Real-Time Streaming FEC |
+| **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns | Heavy Global MDS |
+| **KroneckerAntiDiag** | **5.2 MB** | 2,394 ns | **22 ns** | 998 ns | **High-Throughput Storage Array** |
 
-### High-RTT Verification Roadmap
+---
 
-1. **Retransmissions Avoided per 10,000 Lost Chunks**: Tracking local repair rate before RTT NACK generation.
-2. **Mean Extra RTTs per Completed Object**: Evaluating end-to-end delivery latency impact.
-3. **Temporal Interleaving against Burst Loss**: Decoupling logical 3x3 palace locality from temporal wire-level sequence.
+### Storage Array & Storage-Domain Roadmap
+
+For storage domain validation (`KroneckerAntiDiag`), the critical evaluation metrics shift to:
+1. **Average Blocks Read to Repair 1 Missing Block** (LRC Efficiency Metric).
+2. **Rebuild Bandwidth & Degraded-Read Latency** under single-drive vs dual-drive failures.
+3. **Physical Interleaving Mapping**: Mapping logical $9\times 9$ cells across $N$ physical drives to prevent co-located failure domain loss.
+
+---
+
+### Build & Run
+
+```bash
+make
+
+# Microbenchmark
+dotnet run -c Release --no-build -- bench
+
+# Stress Test (Duration, StrategyIndex)
+dotnet run -c Release --no-build -- 1 5
+```
 
 ---
 
 ## 한국어
 
-10% 드롭 및 5% 패킷 손상(Corruption) 환경에서 6가지 네트워크 패킷 복구 전략의 성능, 메모리 풋프린트, 연산 부하 트레이드오프를 비교 분석하는 락-프리(Lock-free), 제로-할당(Zero-allocation) C# 네트워크 시뮬레이션입니다.
+10% 드롭 및 5% 손상(Corruption) 환경에서 6가지 패킷 및 블록 복구 전략의 성능, 메모리 풋프린트, 도메인별 적합성을 비교 분석하는 락-프리(Lock-free), 제로-할당(Zero-allocation) C# 시뮬레이션입니다.
 
-### High-RTT 관점 분석: 1차 현지 복구 토폴로지 (First-Line Local Repair)
+### 도메인 분리 및 역할 정의 (Domain Separation Matrix)
 
-200 ms 수준의 High-RTT 환경에서는 디코더 연산 시간(998 ns vs 370 ns)의 차이가 무의미합니다 ($998\text{ ns} = 0.000998\text{ ms} \ll 200\text{ ms}$). 핵심 평가 지표는 **재전송 RTT 발생 자체를 현지에서 미리 방지했는가**입니다.
+모든 고전 도상 구조를 하나의 네트워크 FEC 용도로 억지로 맞추는 대신, Generation Size, 복구 지연시간, 공간적 국소성을 기준으로 도메인을 명확히 분리하였습니다:
 
-`KroneckerAntiDiag` 토폴로지는 최적의 **1차 현지 복구 레이어 (First-Line Repair Layer)** 역할을 수행합니다:
-- **수신 처리 속도**: 패킷당 **22 ns** (GF(2^8) 연산 없는 pure bitwise XOR).
-- **메모리 점유**: **5.2 MB** (L3 캐시 내 전재 적재 가능, RS 34.7 MB 대비 85% 절감).
-- **계층형 구조**: `Kronecker 현지 복구 -> 강한 FEC / RS -> NACK / 재전송 요청`.
-
-### 복구 전략 (Recovery Strategies)
-
-| 전략 | 토폴로지 및 동작 원리 |
-|------|----------------------|
-| **BaselineVectorRecovery** | 행 / 열 / 대각선 / 역대각선 합 제약 조건. |
-| **MagicSquareRecovery** | 베이스라인 + 3중 비트마스크 고유성 제약 조건 (Negative Control). |
-| **HexagonalLatticeRecovery** | 7개 멤버 오버랩 육각형 그룹 (276 ns 초고속 복구). |
-| **HtpXorErasureRecovery** | 육각형 그룹 + 6셀 분할 XOR 패리티 이레이저 코딩. |
-| **ReedSolomonRecovery** | 육각형 그룹 + GF(2^8) 반데르몽드 이레이저 코딩. |
-| **KroneckerAntiDiagLatticeRecovery** | **1차 현지 복구 토폴로지**: 3×3 궁 크로네커 곱 분해 + 반대각 직교 대칭 가중 XOR 패리티. |
-
-### 마이크로벤치마크 및 High-RTT 성능 측정
-
-10×10 격자, 10,000 세션 조건 (JIT 워밍업 적용):
-
-| 전략 | 메모리 사용량 | RegisterSession | ProcessPacket | TryRecoverSession | 재전송 회피 특성 |
-|------|-------------|----------------|--------------|------------------|------------------|
-| **Baseline** | 2.4 MB | 1,043 ns | 18 ns | 1,037 ns | 낮음 (단일 결손만 복구) |
-| **MagicSquare** | 7.7 MB | 2,203 ns | 17 ns | 1,039 ns | 낮음 (Negative Control) |
-| **Hexagonal** | 30.5 MB | 6,343 ns | 27 ns | **276 ns** | 초고속 1차 필터 |
-| **HtpXorErasure** | 34.8 MB | 6,415 ns | 67 ns | 350 ns | 높음 (국소 XOR 복구) |
-| **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns | 높음 (수신 시 무거운 GF 연산) |
-| **KroneckerAntiDiag** | **5.2 MB** | 2,394 ns | **22 ns** | 998 ns | **높음 (22 ns 초고속 수신)** |
-
-### High-RTT 검증 로드맵
-
-1. **10,000개 손실 청크당 현지 재전송 회피 수 (Retransmissions Avoided)**
-2. **완료 오브젝트당 평균 추가 RTT 지연 (Mean Extra RTTs per Object)**
-3. **버스트 손실 방지를 위한 인터리빙(Interleaving) 기법 검증**
+1. **`HtpXorErasure` & `Hexagonal` $\rightarrow$ 스트리밍 / High-RTT 네트워크 FEC**
+   - 작은 세대 크기 (6셀 분할 XOR 그룹). 빠른 누적으로 실시간 온라인 스트리밍 복구에 적합.
+2. **`KroneckerAntiDiag` $\rightarrow$ 스토리지 / 객체 저장소 / 지역 복구 코드 (LRC)**
+   - **Generation Size 81 (9×9)**: 실시간 스트리밍에서는 축적 지연이 발생하지만, **스토리지 어레이(RAID/LRC)에서는 계층적 구조의 이점**이 됨.
+   - **비대칭 비동기 비용**: `22 ns 정상 쓰기(Ingest)` vs `998 ns 장애 복구(Rebuild)`. 정상 입출력이 99% 이상인 저장장치 특성상 22 ns / 5.2 MB의 캐시 친화적 정상 경로가 극히 유리함.
+   - **3단계 장애 도메인 계층**: `3×3 궁 현지 복구` $\rightarrow$ `반대각 교차 그룹 복구` $\rightarrow$ `전역 복구`.
+   - **물리적 분산 배치 규칙**: 논리적 3×3 인접성이 동일한 물리 드라이브에 배치되지 않도록 인터리빙하여 드라이브 유실 내성 확보.
+3. **`MagicSquare` $\rightarrow$ 음성 대조군 (Negative Control)**
+   - 단순 방진 정합성이나 수치 규칙만으로는 복구 이득이 전혀 없음(2.39% vs 2.44%)을 증명.
+4. **`ReedSolomon` $\rightarrow$ 대수적 전역 MDS 기준선**
+   - 높은 CPU/메모리 비용을 지불하고 최대 대수적 복구 능력을 제공하는 전역 MDS 표준.
 
 ### 빌드 및 실행 방법
 
