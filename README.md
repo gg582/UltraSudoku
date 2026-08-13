@@ -2,7 +2,7 @@
 
 ## English
 
-A lock-free, zero-allocation C# simulation comparing six packet-and-block recovery strategies across network streaming and storage array domains.
+A lock-free, zero-allocation C# simulation comparing six packet-and-block recovery strategies across network streaming and storage array domains under 10% drop / 5% corruption scenarios.
 
 ### Classical Diagram Origins & Topological Exaptation
 
@@ -14,7 +14,7 @@ This project extracts structural invariants from traditional Korean mathematical
    - Paired Yin-Yang 9x9 diagrams (음양 짝):
      - **Yang Diagram (백자생성교수도)**: 3x3 Kronecker palace hierarchy ($L \otimes L$) forming 9 local palace parity groups.
      - **Yin Diagram (백자생성순수도)**: Anti-diagonal symmetry groups forming orthogonal cross-palace parity groups.
-   - Applied to the 81-cell core region, creating a 3-tier LRC storage array topology (5.2 MB, 22 ns ingest).
+   - Applied to the 81-cell core region, creating a 3-tier LRC storage array topology (5.2 MB memory, 22 ns write ingest).
 
 ### Domain Separation & Categorization Matrix
 
@@ -48,26 +48,26 @@ Rather than forcing all historical diagram topologies into a single network FEC 
 
 ### Strategy Comparison Matrix
 
-| Strategy | Classical Origin (도상) | Primary Domain | Generation Size | Normal Write/Process | Rebuild/Repair Latency | Memory Footprint | Role |
-|----------|-----------------------|----------------|-----------------|----------------------|------------------------|------------------|------|
-| **BaselineVector** | — | Vector Math | 10 cells | 18 ns | 1,037 ns | 2.4 MB | Simple Vector Baseline |
-| **MagicSquare** | — | Negative Control | 100 cells | 17 ns | 1,039 ns | 7.7 MB | Regularity Control |
-| **Hexagonal** | Jisu-gwimundo (지수귀문도) | Local Repair Filter | 7 cells | 27 ns | **276 ns** | 30.5 MB | Fast First-Line Repair |
-| **HtpXorErasure** | Jisu-gwimundo (지수귀문도) | Streaming Network FEC | 6 cells | 67 ns | 350 ns | 34.8 MB | Online High-RTT FEC |
-| **ReedSolomon** | — | Global MDS Code | 6 cells | 78 ns | 370 ns | 34.7 MB | Algebraic Global Baseline |
-| **KroneckerAntiDiag** | Baekja-saengseong-gyosudo & Sunsudo (백자생성교수도 & 순수도) | Storage / RAID / LRC | 81 cells (9x9) | **22 ns** | 998 ns | **5.2 MB** | Hierarchical Array LRC |
+| Strategy | Classical Origin (도상) | Primary Domain | Generation Size | Normal Write/Process | Rebuild/Repair Latency | Memory Footprint | Role & Characteristics |
+|----------|-----------------------|----------------|-----------------|----------------------|------------------------|------------------|-----------------------|
+| **BaselineVector** | — | Vector Math | 10 cells | 18 ns | 1,037 ns | 2.4 MB | Simple Unvalidated Vector Baseline |
+| **MagicSquare** | — | Negative Control | 100 cells | 17 ns | 1,039 ns | 7.7 MB | Regularity Control (Unused) |
+| **Hexagonal** | Jisu-gwimundo (지수귀문도) | Local Repair Filter | 7 cells | 27 ns | **276 ns** | 30.5 MB | Ultra-Fast 1st-Line Local Repair |
+| **HtpXorErasure** | Jisu-gwimundo (지수귀문도) | Streaming Network FEC | 6 cells | 67 ns | 350 ns | 34.8 MB | Online High-RTT Streaming FEC |
+| **ReedSolomon** | — | Global MDS Code | 6 cells | 78 ns | 370 ns | 34.7 MB | Heavy Global Algebraic MDS Baseline |
+| **KroneckerAntiDiag** | Baekja-saengseong-gyosudo & Sunsudo (백자생성교수도 & 순수도) | Storage / RAID / LRC | 81 cells (9x9) | **22 ns** | 998 ns | **5.2 MB** | Hierarchical High-Throughput Array LRC |
 
 ### Microbenchmark & Performance Verification
 
 Measured on a 10x10 grid with 10,000 sessions (JIT-warmed):
 
-| Strategy | Memory | RegisterSession | ProcessPacket (Write Ingest) | TryRecoverSession (Rebuild) | Domain Suitability |
-|----------|--------|----------------|--------------|------------------|-------------------|
-| **Baseline** | 2.4 MB | 1,043 ns | 18 ns | 1,037 ns | Unvalidated Vector |
+| Strategy | Memory | RegisterSession | ProcessPacket (Write Ingest) | TryRecoverSession (Rebuild) | Domain Suitability Evaluation |
+|----------|--------|----------------|------------------------------|-----------------------------|------------------------------|
+| **Baseline** | 2.4 MB | 1,043 ns | 18 ns | 1,037 ns | Unvalidated Simple Vector |
 | **MagicSquare** | 7.7 MB | 2,203 ns | 17 ns | 1,039 ns | Unused (Negative Control) |
-| **Hexagonal** | 30.5 MB | 6,343 ns | 27 ns | **276 ns** | Ultra-Fast Local Filter |
-| **HtpXorErasure** | 34.8 MB | 6,415 ns | 67 ns | 350 ns | Real-Time Streaming FEC |
-| **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns | Heavy Global MDS |
+| **Hexagonal** | 30.5 MB | 6,343 ns | 27 ns | **276 ns** | Ultra-Fast 1st-Line Local Filter |
+| **HtpXorErasure** | 34.8 MB | 6,415 ns | 67 ns | 350 ns | Real-Time Online Streaming FEC |
+| **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns | Heavy Global Algebraic MDS |
 | **KroneckerAntiDiag** | **5.2 MB** | 2,394 ns | **22 ns** | 998 ns | **High-Throughput Storage Array** |
 
 ### Storage Array & Storage-Domain Roadmap
@@ -86,6 +86,7 @@ make
 dotnet run -c Release --no-build -- bench
 
 # Stress Test (Duration, StrategyIndex)
+# Strategy Index: 0: Baseline, 1: MagicSquare, 2: Hexagonal, 3: HtpXorErasure, 4: ReedSolomon, 5: KroneckerAntiDiag
 dotnet run -c Release --no-build -- 1 5
 ```
 
@@ -141,12 +142,12 @@ dotnet run -c Release --no-build -- 1 5
 
 | 전략 | 고전 도상 출처 | 주요 적용 도메인 | 세대 크기 | 정상 쓰기/수신 속도 | 리빌드/복구 지연시간 | 메모리 점유량 | 역할 및 특징 |
 |------|--------------|----------------|----------|--------------------|--------------------|--------------|--------------|
-| **BaselineVector** | — | 벡터 합 수학 | 10 cells | 18 ns | 1,037 ns | 2.4 MB | 단순 벡터 기준선 |
-| **MagicSquare** | — | 음성 대조군 | 100 cells | 17 ns | 1,039 ns | 7.7 MB | 단순 정합성 대조군 |
-| **Hexagonal** | 지수귀문도 (Jisu-gwimundo) | 국소 복구 필터 | 7 cells | 27 ns | **276 ns** | 30.5 MB | 초고속 1차 현지 복구 |
-| **HtpXorErasure** | 지수귀문도 (Jisu-gwimundo) | 스트리밍 네트워크 FEC | 6 cells | 67 ns | 350 ns | 34.8 MB | 실시간 High-RTT FEC |
-| **ReedSolomon** | — | 전역 MDS 코딩 | 6 cells | 78 ns | 370 ns | 34.7 MB | 무거운 전역 대수 코딩 |
-| **KroneckerAntiDiag** | 백자생성교수도 & 백자생성순수도 (Baekja-saengseong) | 스토리지 / RAID / LRC | 81 cells (9x9) | **22 ns** | 998 ns | **5.2 MB** | 계층형 어레이 LRC |
+| **BaselineVector** | — | 벡터 합 수학 | 10 cells | 18 ns | 1,037 ns | 2.4 MB | 단순 검증되지 않은 벡터 기준선 |
+| **MagicSquare** | — | 음성 대조군 | 100 cells | 17 ns | 1,039 ns | 7.7 MB | 단순 정합성 대조군 (미사용) |
+| **Hexagonal** | 지수귀문도 (Jisu-gwimundo) | 국소 복구 필터 | 7 cells | 27 ns | **276 ns** | 30.5 MB | 초고속 1차 현지 복구 필터 |
+| **HtpXorErasure** | 지수귀문도 (Jisu-gwimundo) | 스트리밍 네트워크 FEC | 6 cells | 67 ns | 350 ns | 34.8 MB | 실시간 온라인 스트리밍 FEC |
+| **ReedSolomon** | — | 전역 MDS 코딩 | 6 cells | 78 ns | 370 ns | 34.7 MB | 무거운 전역 대수 MDS 기준선 |
+| **KroneckerAntiDiag** | 백자생성교수도 & 백자생성순수도 (Baekja-saengseong) | 스토리지 / RAID / LRC | 81 cells (9x9) | **22 ns** | 998 ns | **5.2 MB** | 계층형 고성능 어레이 LRC |
 
 ### 마이크로벤치마크 및 성능 검증 결과
 
@@ -157,8 +158,8 @@ dotnet run -c Release --no-build -- 1 5
 | **Baseline** | 2.4 MB | 1,043 ns | 18 ns | 1,037 ns | 검증되지 않은 단순 벡터 |
 | **MagicSquare** | 7.7 MB | 2,203 ns | 17 ns | 1,039 ns | 미사용 (음성 대조군) |
 | **Hexagonal** | 30.5 MB | 6,343 ns | 27 ns | **276 ns** | 초고속 1차 국소 필터 |
-| **HtpXorErasure** | 34.8 MB | 6,415 ns | 67 ns | 350 ns | 실시간 스트리밍 FEC |
-| **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns | 무거운 전역 MDS |
+| **HtpXorErasure** | 34.8 MB | 6,415 ns | 67 ns | 350 ns | 실시간 온라인 스트리밍 FEC |
+| **ReedSolomon** | 34.7 MB | 6,021 ns | 78 ns | 370 ns | 무거운 전역 대수 MDS |
 | **KroneckerAntiDiag** | **5.2 MB** | 2,394 ns | **22 ns** | 998 ns | **고성능 스토리지 어레이** |
 
 ### 스토리지 어레이 검증 로드맵 (Storage-Domain Roadmap)
