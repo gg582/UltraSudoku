@@ -11,4 +11,10 @@ dotnet run -c Release --no-build -- 10 1 > test_magic_10min.log 2>&1
 echo "=== HexagonalLatticeRecovery (10 min) ==="
 dotnet run -c Release --no-build -- 10 2 > test_hex_10min.log 2>&1
 
+echo "=== HtpXorErasureRecovery (10 min) ==="
+dotnet run -c Release --no-build -- 10 3 > test_htpxor_10min.log 2>&1
+
+echo "=== ReedSolomonRecovery (10 min) ==="
+dotnet run -c Release --no-build -- 10 4 > test_rs_10min.log 2>&1
+
 echo "=== All tests complete ==="

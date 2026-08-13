@@ -38,6 +38,8 @@ namespace UltraSudoku
             {
                 if (args[1] == "1") RecoveryStrategy = new MagicSquareRecovery();
                 else if (args[1] == "2") RecoveryStrategy = new HexagonalLatticeRecovery();
+                else if (args[1] == "3") RecoveryStrategy = new HtpXorErasureRecovery();
+                else if (args[1] == "4") RecoveryStrategy = new ReedSolomonRecovery();
             }
 
             Console.WriteLine("\u001b[1;37mUltra Sudoku Lattice Server Boot Sequence\u001b[0m");

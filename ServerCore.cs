@@ -1070,6 +1070,955 @@ namespace UltraSudoku
         }
     }
 
+    public sealed class HtpXorErasureRecovery : IRecoveryStrategy
+    {
+        public const int MaxSessions = 16384;
+        public const int MaxGridSize = 10;
+        public const int MaxGridCells = 100;
+        public const int XorGroupSize = 6;
+        public const int MaxXorGroups = 17; // ceil(MaxGridCells / XorGroupSize)
+        public const byte NoXorGroup = 255;
+
+        private readonly uint[] _expectedSums;
+        private readonly int[] _gridSizes;
+        private readonly uint[] _sessionIdMap;
+        private readonly ulong[] _blankCellMaskLow;
+        private readonly ulong[] _blankCellMaskHigh;
+        private readonly ulong[] _arrivedMaskLow;
+        private readonly ulong[] _arrivedMaskHigh;
+        private readonly uint[] _rowSums;
+        private readonly uint[] _colSums;
+        private readonly uint[] _diagSums;
+        private readonly uint[] _antiDiagSums;
+        private readonly byte[] _rowCounts;
+        private readonly byte[] _colCounts;
+        private readonly byte[] _diagCounts;
+        private readonly byte[] _antiDiagCounts;
+
+        private readonly uint[] _hexExpectedSums;
+        private readonly uint[] _hexCurrentSums;
+        private readonly byte[] _hexCounts;
+        private readonly byte[] _hexGroupSizes;
+        private readonly byte[] _hexMemberToGroups;
+        private readonly byte[] _hexMemberToGroupCount;
+
+        private readonly uint[] _xorExpectedParity;
+        private readonly uint[] _xorCurrentParity;
+        private readonly byte[] _xorCounts;
+        private readonly byte[] _xorGroupSizes;
+        private readonly byte[] _xorCellGroup;
+
+        public HtpXorErasureRecovery()
+        {
+            int s = MaxSessions;
+            int v = MaxSessions * MaxGridSize;
+            int c = MaxSessions * MaxGridCells;
+            int mg = MaxSessions * MaxGridCells * 7;
+            int x = MaxSessions * MaxXorGroups;
+
+            _expectedSums = new uint[s];
+            _gridSizes = new int[s];
+            _sessionIdMap = new uint[s];
+            _blankCellMaskLow = new ulong[s];
+            _blankCellMaskHigh = new ulong[s];
+            _arrivedMaskLow = new ulong[s];
+            _arrivedMaskHigh = new ulong[s];
+            _rowSums = new uint[v];
+            _colSums = new uint[v];
+            _diagSums = new uint[s];
+            _antiDiagSums = new uint[s];
+            _rowCounts = new byte[v];
+            _colCounts = new byte[v];
+            _diagCounts = new byte[s];
+            _antiDiagCounts = new byte[s];
+
+            _hexExpectedSums = new uint[c];
+            _hexCurrentSums = new uint[c];
+            _hexCounts = new byte[c];
+            _hexGroupSizes = new byte[c];
+            _hexMemberToGroups = new byte[mg];
+            _hexMemberToGroupCount = new byte[c];
+
+            _xorExpectedParity = new uint[x];
+            _xorCurrentParity = new uint[x];
+            _xorCounts = new byte[x];
+            _xorGroupSizes = new byte[x];
+            _xorCellGroup = new byte[c];
+        }
+
+        public void RegisterSession(int slotIndex, uint sessionId, int gridSize, uint expectedSum, ReadOnlySpan<byte> currentGrid, ReadOnlySpan<byte> solutionGrid)
+        {
+            _sessionIdMap[slotIndex] = sessionId;
+            _expectedSums[slotIndex] = expectedSum;
+            _gridSizes[slotIndex] = gridSize;
+            _blankCellMaskLow[slotIndex] = 0;
+            _blankCellMaskHigh[slotIndex] = 0;
+            _arrivedMaskLow[slotIndex] = 0;
+            _arrivedMaskHigh[slotIndex] = 0;
+            int cells = gridSize * gridSize;
+            for (int i = 0; i < cells; i++)
+            {
+                if (currentGrid[i] == 0)
+                {
+                    if (i < 64)
+                        _blankCellMaskLow[slotIndex] |= (1UL << i);
+                    else
+                        _blankCellMaskHigh[slotIndex] |= (1UL << (i - 64));
+                }
+            }
+            int vBase = slotIndex * MaxGridSize;
+            for (int r = 0; r < gridSize; r++)
+            {
+                _rowSums[vBase + r] = 0;
+                _rowCounts[vBase + r] = 0;
+            }
+            for (int c = 0; c < gridSize; c++)
+            {
+                _colSums[vBase + c] = 0;
+                _colCounts[vBase + c] = 0;
+            }
+            _diagSums[slotIndex] = 0;
+            _antiDiagSums[slotIndex] = 0;
+            _diagCounts[slotIndex] = 0;
+            _antiDiagCounts[slotIndex] = 0;
+
+            int hBase = slotIndex * MaxGridCells;
+            int mBase = slotIndex * MaxGridCells * 7;
+            for (int i = 0; i < MaxGridCells; i++)
+            {
+                _hexExpectedSums[hBase + i] = 0;
+                _hexCurrentSums[hBase + i] = 0;
+                _hexCounts[hBase + i] = 0;
+                _hexGroupSizes[hBase + i] = 0;
+                _hexMemberToGroupCount[hBase + i] = 0;
+                for (int g = 0; g < 7; g++)
+                {
+                    _hexMemberToGroups[mBase + i * 7 + g] = 0;
+                }
+            }
+
+            for (int r = 1; r < gridSize - 1; r++)
+            {
+                for (int c = 1; c < gridSize - 1; c++)
+                {
+                    int centerIdx = r * gridSize + c;
+                    _hexGroupSizes[hBase + centerIdx] = 7;
+
+                    uint groupSum = 0;
+
+                    // center (r, c)
+                    groupSum += solutionGrid[centerIdx];
+                    int cnt = _hexMemberToGroupCount[hBase + centerIdx];
+                    _hexMemberToGroups[mBase + centerIdx * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + centerIdx] = (byte)(cnt + 1);
+
+                    // top-left (r-1, c-1)
+                    int tl = (r - 1) * gridSize + (c - 1);
+                    groupSum += solutionGrid[tl];
+                    cnt = _hexMemberToGroupCount[hBase + tl];
+                    _hexMemberToGroups[mBase + tl * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + tl] = (byte)(cnt + 1);
+
+                    // top (r-1, c)
+                    int t = (r - 1) * gridSize + c;
+                    groupSum += solutionGrid[t];
+                    cnt = _hexMemberToGroupCount[hBase + t];
+                    _hexMemberToGroups[mBase + t * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + t] = (byte)(cnt + 1);
+
+                    // left (r, c-1)
+                    int l = r * gridSize + (c - 1);
+                    groupSum += solutionGrid[l];
+                    cnt = _hexMemberToGroupCount[hBase + l];
+                    _hexMemberToGroups[mBase + l * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + l] = (byte)(cnt + 1);
+
+                    // right (r, c+1)
+                    int rr = r * gridSize + (c + 1);
+                    groupSum += solutionGrid[rr];
+                    cnt = _hexMemberToGroupCount[hBase + rr];
+                    _hexMemberToGroups[mBase + rr * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + rr] = (byte)(cnt + 1);
+
+                    // bottom (r+1, c)
+                    int b = (r + 1) * gridSize + c;
+                    groupSum += solutionGrid[b];
+                    cnt = _hexMemberToGroupCount[hBase + b];
+                    _hexMemberToGroups[mBase + b * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + b] = (byte)(cnt + 1);
+
+                    // bottom-right (r+1, c+1)
+                    int br = (r + 1) * gridSize + (c + 1);
+                    groupSum += solutionGrid[br];
+                    cnt = _hexMemberToGroupCount[hBase + br];
+                    _hexMemberToGroups[mBase + br * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + br] = (byte)(cnt + 1);
+
+                    _hexExpectedSums[hBase + centerIdx] = groupSum;
+                }
+            }
+
+            int xBase = slotIndex * MaxXorGroups;
+            for (int g = 0; g < MaxXorGroups; g++)
+            {
+                _xorExpectedParity[xBase + g] = 0;
+                _xorCurrentParity[xBase + g] = 0;
+                _xorCounts[xBase + g] = 0;
+                _xorGroupSizes[xBase + g] = 0;
+            }
+            for (int i = 0; i < MaxGridCells; i++)
+            {
+                _xorCellGroup[hBase + i] = NoXorGroup;
+            }
+            int blankOrdinal = 0;
+            for (int i = 0; i < cells; i++)
+            {
+                if (currentGrid[i] == 0)
+                {
+                    int groupIdx = blankOrdinal / XorGroupSize;
+                    _xorCellGroup[hBase + i] = (byte)groupIdx;
+                    _xorExpectedParity[xBase + groupIdx] ^= solutionGrid[i];
+                    _xorGroupSizes[xBase + groupIdx]++;
+                    blankOrdinal++;
+                }
+            }
+        }
+
+        public void ProcessPacket(int slotIndex, MovePacket packet)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            int linearIdx = packet.Row * gridSize + packet.Col;
+            ulong blankBit = linearIdx < 64
+                ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (blankBit == 0)
+                return;
+            ulong arrivedBit = linearIdx < 64
+                ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (arrivedBit != 0)
+                return;
+            if (linearIdx < 64)
+                _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+            else
+                _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+            int vBase = slotIndex * MaxGridSize;
+            _rowSums[vBase + packet.Row] += packet.Value;
+            _rowCounts[vBase + packet.Row]++;
+            _colSums[vBase + packet.Col] += packet.Value;
+            _colCounts[vBase + packet.Col]++;
+            if (packet.Row == packet.Col)
+            {
+                _diagSums[slotIndex] += packet.Value;
+                _diagCounts[slotIndex]++;
+            }
+            if (packet.Row + packet.Col == gridSize - 1)
+            {
+                _antiDiagSums[slotIndex] += packet.Value;
+                _antiDiagCounts[slotIndex]++;
+            }
+
+            int hBase = slotIndex * MaxGridCells;
+            int mBase = slotIndex * MaxGridCells * 7;
+            int groupCount = _hexMemberToGroupCount[hBase + linearIdx];
+            for (int g = 0; g < groupCount; g++)
+            {
+                int groupIdx = _hexMemberToGroups[mBase + linearIdx * 7 + g];
+                _hexCurrentSums[hBase + groupIdx] += packet.Value;
+                _hexCounts[hBase + groupIdx]++;
+            }
+
+            int xorGroup = _xorCellGroup[hBase + linearIdx];
+            if (xorGroup != NoXorGroup)
+            {
+                int xBase = slotIndex * MaxXorGroups;
+                _xorCurrentParity[xBase + xorGroup] ^= packet.Value;
+                _xorCounts[xBase + xorGroup]++;
+            }
+        }
+
+        public int TryRecoverSession(int slotIndex, Span<MovePacket> outputBuffer)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            uint expectedSum = _expectedSums[slotIndex];
+            int vBase = slotIndex * MaxGridSize;
+            uint sessionId = _sessionIdMap[slotIndex];
+            int hBase = slotIndex * MaxGridCells;
+            int mBase = slotIndex * MaxGridCells * 7;
+            int xBase = slotIndex * MaxXorGroups;
+            int totalRecovered = 0;
+            bool found;
+            do
+            {
+                found = false;
+                for (int linearIdx = 0; linearIdx < gridSize * gridSize; linearIdx++)
+                {
+                    ulong blankBit = linearIdx < 64
+                        ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (blankBit == 0)
+                        continue;
+                    ulong arrivedBit = linearIdx < 64
+                        ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (arrivedBit != 0)
+                        continue;
+
+                    int row = linearIdx / gridSize;
+                    int col = linearIdx % gridSize;
+                    uint candidate = 0;
+                    bool hasCandidate = false;
+
+                    int groupCount = _hexMemberToGroupCount[hBase + linearIdx];
+                    for (int g = 0; g < groupCount; g++)
+                    {
+                        int groupIdx = _hexMemberToGroups[mBase + linearIdx * 7 + g];
+                        int groupSize = _hexGroupSizes[hBase + groupIdx];
+                        if (groupSize == 0)
+                            continue;
+                        if (_hexCounts[hBase + groupIdx] == groupSize - 1)
+                        {
+                            uint hc = _hexExpectedSums[hBase + groupIdx] - _hexCurrentSums[hBase + groupIdx];
+                            if (!hasCandidate)
+                            {
+                                candidate = hc;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != hc)
+                            {
+                                hasCandidate = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    int xorGroup = _xorCellGroup[hBase + linearIdx];
+                    if (xorGroup != NoXorGroup && _xorGroupSizes[xBase + xorGroup] > 0
+                        && _xorCounts[xBase + xorGroup] == _xorGroupSizes[xBase + xorGroup] - 1)
+                    {
+                        uint xc = _xorExpectedParity[xBase + xorGroup] ^ _xorCurrentParity[xBase + xorGroup];
+                        if (!hasCandidate)
+                        {
+                            candidate = xc;
+                            hasCandidate = true;
+                        }
+                        else if (candidate != xc)
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (!hasCandidate)
+                    {
+                        int rowCount = _rowCounts[vBase + row];
+                        if (rowCount == gridSize - 1)
+                        {
+                            candidate = expectedSum - _rowSums[vBase + row];
+                            hasCandidate = true;
+                        }
+
+                        int colCount = _colCounts[vBase + col];
+                        if (colCount == gridSize - 1)
+                        {
+                            uint cc = expectedSum - _colSums[vBase + col];
+                            if (!hasCandidate)
+                            {
+                                candidate = cc;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != cc)
+                            {
+                                continue;
+                            }
+                        }
+
+                        if (row == col)
+                        {
+                            if (_diagCounts[slotIndex] == gridSize - 1)
+                            {
+                                uint dc = expectedSum - _diagSums[slotIndex];
+                                if (!hasCandidate)
+                                {
+                                    candidate = dc;
+                                    hasCandidate = true;
+                                }
+                                else if (candidate != dc)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if (row + col == gridSize - 1)
+                        {
+                            if (_antiDiagCounts[slotIndex] == gridSize - 1)
+                            {
+                                uint ac = expectedSum - _antiDiagSums[slotIndex];
+                                if (!hasCandidate)
+                                {
+                                    candidate = ac;
+                                    hasCandidate = true;
+                                }
+                                else if (candidate != ac)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    if (hasCandidate && candidate > 0 && candidate <= 255)
+                    {
+                        if (linearIdx < 64)
+                            _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+                        else
+                            _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+                        _rowSums[vBase + row] += candidate;
+                        _rowCounts[vBase + row]++;
+                        _colSums[vBase + col] += candidate;
+                        _colCounts[vBase + col]++;
+                        if (row == col)
+                        {
+                            _diagSums[slotIndex] += candidate;
+                            _diagCounts[slotIndex]++;
+                        }
+                        if (row + col == gridSize - 1)
+                        {
+                            _antiDiagSums[slotIndex] += candidate;
+                            _antiDiagCounts[slotIndex]++;
+                        }
+
+                        for (int g = 0; g < groupCount; g++)
+                        {
+                            int groupIdx = _hexMemberToGroups[mBase + linearIdx * 7 + g];
+                            _hexCurrentSums[hBase + groupIdx] += candidate;
+                            _hexCounts[hBase + groupIdx]++;
+                        }
+
+                        if (xorGroup != NoXorGroup)
+                        {
+                            _xorCurrentParity[xBase + xorGroup] ^= candidate;
+                            _xorCounts[xBase + xorGroup]++;
+                        }
+
+                        outputBuffer[totalRecovered++] = new MovePacket
+                        {
+                            SessionId = sessionId,
+                            Row = (byte)row,
+                            Col = (byte)col,
+                            Value = (byte)candidate
+                        };
+                        found = true;
+                        if (totalRecovered >= outputBuffer.Length)
+                            break;
+                    }
+                }
+            }
+            while (found && totalRecovered < outputBuffer.Length);
+            return totalRecovered;
+        }
+    }
+
+    public sealed class ReedSolomonRecovery : IRecoveryStrategy
+    {
+        public const int MaxSessions = 16384;
+        public const int MaxGridSize = 10;
+        public const int MaxGridCells = 100;
+        public const int RsGroupSize = 6;
+        public const int MaxRsGroups = 17; // ceil(MaxGridCells / RsGroupSize)
+        public const byte NoRsGroup = 255;
+
+        private static readonly byte[] GfExp = new byte[512];
+        private static readonly byte[] GfLog = new byte[256];
+        private static readonly byte[] GfInv = new byte[256];
+
+        static ReedSolomonRecovery()
+        {
+            int x = 1;
+            for (int i = 0; i < 255; i++)
+            {
+                GfExp[i] = (byte)x;
+                GfLog[x] = (byte)i;
+                x <<= 1;
+                if ((x & 0x100) != 0)
+                {
+                    x ^= 0x11D;
+                }
+            }
+            for (int i = 255; i < 512; i++)
+            {
+                GfExp[i] = GfExp[i - 255];
+            }
+            for (int i = 1; i < 256; i++)
+            {
+                GfInv[i] = GfExp[255 - GfLog[i]];
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static byte GfMul(byte a, byte b)
+        {
+            if (a == 0 || b == 0)
+            {
+                return 0;
+            }
+            return GfExp[GfLog[a] + GfLog[b]];
+        }
+
+        private readonly uint[] _expectedSums;
+        private readonly int[] _gridSizes;
+        private readonly uint[] _sessionIdMap;
+        private readonly ulong[] _blankCellMaskLow;
+        private readonly ulong[] _blankCellMaskHigh;
+        private readonly ulong[] _arrivedMaskLow;
+        private readonly ulong[] _arrivedMaskHigh;
+        private readonly uint[] _rowSums;
+        private readonly uint[] _colSums;
+        private readonly uint[] _diagSums;
+        private readonly uint[] _antiDiagSums;
+        private readonly byte[] _rowCounts;
+        private readonly byte[] _colCounts;
+        private readonly byte[] _diagCounts;
+        private readonly byte[] _antiDiagCounts;
+
+        private readonly uint[] _hexExpectedSums;
+        private readonly uint[] _hexCurrentSums;
+        private readonly byte[] _hexCounts;
+        private readonly byte[] _hexGroupSizes;
+        private readonly byte[] _hexMemberToGroups;
+        private readonly byte[] _hexMemberToGroupCount;
+
+        private readonly byte[] _rsExpectedParity;
+        private readonly byte[] _rsCurrentParity;
+        private readonly byte[] _rsCounts;
+        private readonly byte[] _rsGroupSizes;
+        private readonly byte[] _rsCellGroup;
+        private readonly byte[] _rsCellPos;
+
+        public ReedSolomonRecovery()
+        {
+            int s = MaxSessions;
+            int v = MaxSessions * MaxGridSize;
+            int c = MaxSessions * MaxGridCells;
+            int mg = MaxSessions * MaxGridCells * 7;
+            int x = MaxSessions * MaxRsGroups;
+
+            _expectedSums = new uint[s];
+            _gridSizes = new int[s];
+            _sessionIdMap = new uint[s];
+            _blankCellMaskLow = new ulong[s];
+            _blankCellMaskHigh = new ulong[s];
+            _arrivedMaskLow = new ulong[s];
+            _arrivedMaskHigh = new ulong[s];
+            _rowSums = new uint[v];
+            _colSums = new uint[v];
+            _diagSums = new uint[s];
+            _antiDiagSums = new uint[s];
+            _rowCounts = new byte[v];
+            _colCounts = new byte[v];
+            _diagCounts = new byte[s];
+            _antiDiagCounts = new byte[s];
+
+            _hexExpectedSums = new uint[c];
+            _hexCurrentSums = new uint[c];
+            _hexCounts = new byte[c];
+            _hexGroupSizes = new byte[c];
+            _hexMemberToGroups = new byte[mg];
+            _hexMemberToGroupCount = new byte[c];
+
+            _rsExpectedParity = new byte[x];
+            _rsCurrentParity = new byte[x];
+            _rsCounts = new byte[x];
+            _rsGroupSizes = new byte[x];
+            _rsCellGroup = new byte[c];
+            _rsCellPos = new byte[c];
+        }
+
+        public void RegisterSession(int slotIndex, uint sessionId, int gridSize, uint expectedSum, ReadOnlySpan<byte> currentGrid, ReadOnlySpan<byte> solutionGrid)
+        {
+            _sessionIdMap[slotIndex] = sessionId;
+            _expectedSums[slotIndex] = expectedSum;
+            _gridSizes[slotIndex] = gridSize;
+            _blankCellMaskLow[slotIndex] = 0;
+            _blankCellMaskHigh[slotIndex] = 0;
+            _arrivedMaskLow[slotIndex] = 0;
+            _arrivedMaskHigh[slotIndex] = 0;
+            int cells = gridSize * gridSize;
+            for (int i = 0; i < cells; i++)
+            {
+                if (currentGrid[i] == 0)
+                {
+                    if (i < 64)
+                        _blankCellMaskLow[slotIndex] |= (1UL << i);
+                    else
+                        _blankCellMaskHigh[slotIndex] |= (1UL << (i - 64));
+                }
+            }
+            int vBase = slotIndex * MaxGridSize;
+            for (int r = 0; r < gridSize; r++)
+            {
+                _rowSums[vBase + r] = 0;
+                _rowCounts[vBase + r] = 0;
+            }
+            for (int c = 0; c < gridSize; c++)
+            {
+                _colSums[vBase + c] = 0;
+                _colCounts[vBase + c] = 0;
+            }
+            _diagSums[slotIndex] = 0;
+            _antiDiagSums[slotIndex] = 0;
+            _diagCounts[slotIndex] = 0;
+            _antiDiagCounts[slotIndex] = 0;
+
+            int hBase = slotIndex * MaxGridCells;
+            int mBase = slotIndex * MaxGridCells * 7;
+            for (int i = 0; i < MaxGridCells; i++)
+            {
+                _hexExpectedSums[hBase + i] = 0;
+                _hexCurrentSums[hBase + i] = 0;
+                _hexCounts[hBase + i] = 0;
+                _hexGroupSizes[hBase + i] = 0;
+                _hexMemberToGroupCount[hBase + i] = 0;
+                for (int g = 0; g < 7; g++)
+                {
+                    _hexMemberToGroups[mBase + i * 7 + g] = 0;
+                }
+            }
+
+            for (int r = 1; r < gridSize - 1; r++)
+            {
+                for (int c = 1; c < gridSize - 1; c++)
+                {
+                    int centerIdx = r * gridSize + c;
+                    _hexGroupSizes[hBase + centerIdx] = 7;
+
+                    uint groupSum = 0;
+
+                    // center (r, c)
+                    groupSum += solutionGrid[centerIdx];
+                    int cnt = _hexMemberToGroupCount[hBase + centerIdx];
+                    _hexMemberToGroups[mBase + centerIdx * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + centerIdx] = (byte)(cnt + 1);
+
+                    // top-left (r-1, c-1)
+                    int tl = (r - 1) * gridSize + (c - 1);
+                    groupSum += solutionGrid[tl];
+                    cnt = _hexMemberToGroupCount[hBase + tl];
+                    _hexMemberToGroups[mBase + tl * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + tl] = (byte)(cnt + 1);
+
+                    // top (r-1, c)
+                    int t = (r - 1) * gridSize + c;
+                    groupSum += solutionGrid[t];
+                    cnt = _hexMemberToGroupCount[hBase + t];
+                    _hexMemberToGroups[mBase + t * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + t] = (byte)(cnt + 1);
+
+                    // left (r, c-1)
+                    int l = r * gridSize + (c - 1);
+                    groupSum += solutionGrid[l];
+                    cnt = _hexMemberToGroupCount[hBase + l];
+                    _hexMemberToGroups[mBase + l * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + l] = (byte)(cnt + 1);
+
+                    // right (r, c+1)
+                    int rr = r * gridSize + (c + 1);
+                    groupSum += solutionGrid[rr];
+                    cnt = _hexMemberToGroupCount[hBase + rr];
+                    _hexMemberToGroups[mBase + rr * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + rr] = (byte)(cnt + 1);
+
+                    // bottom (r+1, c)
+                    int b = (r + 1) * gridSize + c;
+                    groupSum += solutionGrid[b];
+                    cnt = _hexMemberToGroupCount[hBase + b];
+                    _hexMemberToGroups[mBase + b * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + b] = (byte)(cnt + 1);
+
+                    // bottom-right (r+1, c+1)
+                    int br = (r + 1) * gridSize + (c + 1);
+                    groupSum += solutionGrid[br];
+                    cnt = _hexMemberToGroupCount[hBase + br];
+                    _hexMemberToGroups[mBase + br * 7 + cnt] = (byte)centerIdx;
+                    _hexMemberToGroupCount[hBase + br] = (byte)(cnt + 1);
+
+                    _hexExpectedSums[hBase + centerIdx] = groupSum;
+                }
+            }
+
+            int xBase = slotIndex * MaxRsGroups;
+            for (int g = 0; g < MaxRsGroups; g++)
+            {
+                _rsExpectedParity[xBase + g] = 0;
+                _rsCurrentParity[xBase + g] = 0;
+                _rsCounts[xBase + g] = 0;
+                _rsGroupSizes[xBase + g] = 0;
+            }
+            for (int i = 0; i < MaxGridCells; i++)
+            {
+                _rsCellGroup[hBase + i] = NoRsGroup;
+                _rsCellPos[hBase + i] = 0;
+            }
+            int blankOrdinal = 0;
+            for (int i = 0; i < cells; i++)
+            {
+                if (currentGrid[i] == 0)
+                {
+                    int groupIdx = blankOrdinal / RsGroupSize;
+                    int pos = blankOrdinal % RsGroupSize;
+                    _rsCellGroup[hBase + i] = (byte)groupIdx;
+                    _rsCellPos[hBase + i] = (byte)pos;
+                    // Vandermonde parity row: coefficient for position pos is alpha^pos
+                    _rsExpectedParity[xBase + groupIdx] ^= GfMul(solutionGrid[i], GfExp[pos]);
+                    _rsGroupSizes[xBase + groupIdx]++;
+                    blankOrdinal++;
+                }
+            }
+        }
+
+        public void ProcessPacket(int slotIndex, MovePacket packet)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            int linearIdx = packet.Row * gridSize + packet.Col;
+            ulong blankBit = linearIdx < 64
+                ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (blankBit == 0)
+                return;
+            ulong arrivedBit = linearIdx < 64
+                ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (arrivedBit != 0)
+                return;
+            if (linearIdx < 64)
+                _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+            else
+                _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+            int vBase = slotIndex * MaxGridSize;
+            _rowSums[vBase + packet.Row] += packet.Value;
+            _rowCounts[vBase + packet.Row]++;
+            _colSums[vBase + packet.Col] += packet.Value;
+            _colCounts[vBase + packet.Col]++;
+            if (packet.Row == packet.Col)
+            {
+                _diagSums[slotIndex] += packet.Value;
+                _diagCounts[slotIndex]++;
+            }
+            if (packet.Row + packet.Col == gridSize - 1)
+            {
+                _antiDiagSums[slotIndex] += packet.Value;
+                _antiDiagCounts[slotIndex]++;
+            }
+
+            int hBase = slotIndex * MaxGridCells;
+            int mBase = slotIndex * MaxGridCells * 7;
+            int groupCount = _hexMemberToGroupCount[hBase + linearIdx];
+            for (int g = 0; g < groupCount; g++)
+            {
+                int groupIdx = _hexMemberToGroups[mBase + linearIdx * 7 + g];
+                _hexCurrentSums[hBase + groupIdx] += packet.Value;
+                _hexCounts[hBase + groupIdx]++;
+            }
+
+            int rsGroup = _rsCellGroup[hBase + linearIdx];
+            if (rsGroup != NoRsGroup)
+            {
+                int xBase = slotIndex * MaxRsGroups;
+                int pos = _rsCellPos[hBase + linearIdx];
+                _rsCurrentParity[xBase + rsGroup] ^= GfMul(packet.Value, GfExp[pos]);
+                _rsCounts[xBase + rsGroup]++;
+            }
+        }
+
+        public int TryRecoverSession(int slotIndex, Span<MovePacket> outputBuffer)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            uint expectedSum = _expectedSums[slotIndex];
+            int vBase = slotIndex * MaxGridSize;
+            uint sessionId = _sessionIdMap[slotIndex];
+            int hBase = slotIndex * MaxGridCells;
+            int mBase = slotIndex * MaxGridCells * 7;
+            int xBase = slotIndex * MaxRsGroups;
+            int totalRecovered = 0;
+            bool found;
+            do
+            {
+                found = false;
+                for (int linearIdx = 0; linearIdx < gridSize * gridSize; linearIdx++)
+                {
+                    ulong blankBit = linearIdx < 64
+                        ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (blankBit == 0)
+                        continue;
+                    ulong arrivedBit = linearIdx < 64
+                        ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (arrivedBit != 0)
+                        continue;
+
+                    int row = linearIdx / gridSize;
+                    int col = linearIdx % gridSize;
+                    uint candidate = 0;
+                    bool hasCandidate = false;
+
+                    int groupCount = _hexMemberToGroupCount[hBase + linearIdx];
+                    for (int g = 0; g < groupCount; g++)
+                    {
+                        int groupIdx = _hexMemberToGroups[mBase + linearIdx * 7 + g];
+                        int groupSize = _hexGroupSizes[hBase + groupIdx];
+                        if (groupSize == 0)
+                            continue;
+                        if (_hexCounts[hBase + groupIdx] == groupSize - 1)
+                        {
+                            uint hc = _hexExpectedSums[hBase + groupIdx] - _hexCurrentSums[hBase + groupIdx];
+                            if (!hasCandidate)
+                            {
+                                candidate = hc;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != hc)
+                            {
+                                hasCandidate = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    int rsGroup = _rsCellGroup[hBase + linearIdx];
+                    int rsPos = _rsCellPos[hBase + linearIdx];
+                    if (rsGroup != NoRsGroup && _rsGroupSizes[xBase + rsGroup] > 0
+                        && _rsCounts[xBase + rsGroup] == _rsGroupSizes[xBase + rsGroup] - 1)
+                    {
+                        // single erasure: d = (expected ^ current) / alpha^pos in GF(2^8)
+                        byte syndrome = (byte)(_rsExpectedParity[xBase + rsGroup] ^ _rsCurrentParity[xBase + rsGroup]);
+                        uint rc = GfMul(syndrome, GfInv[GfExp[rsPos]]);
+                        if (!hasCandidate)
+                        {
+                            candidate = rc;
+                            hasCandidate = true;
+                        }
+                        else if (candidate != rc)
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (!hasCandidate)
+                    {
+                        int rowCount = _rowCounts[vBase + row];
+                        if (rowCount == gridSize - 1)
+                        {
+                            candidate = expectedSum - _rowSums[vBase + row];
+                            hasCandidate = true;
+                        }
+
+                        int colCount = _colCounts[vBase + col];
+                        if (colCount == gridSize - 1)
+                        {
+                            uint cc = expectedSum - _colSums[vBase + col];
+                            if (!hasCandidate)
+                            {
+                                candidate = cc;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != cc)
+                            {
+                                continue;
+                            }
+                        }
+
+                        if (row == col)
+                        {
+                            if (_diagCounts[slotIndex] == gridSize - 1)
+                            {
+                                uint dc = expectedSum - _diagSums[slotIndex];
+                                if (!hasCandidate)
+                                {
+                                    candidate = dc;
+                                    hasCandidate = true;
+                                }
+                                else if (candidate != dc)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if (row + col == gridSize - 1)
+                        {
+                            if (_antiDiagCounts[slotIndex] == gridSize - 1)
+                            {
+                                uint ac = expectedSum - _antiDiagSums[slotIndex];
+                                if (!hasCandidate)
+                                {
+                                    candidate = ac;
+                                    hasCandidate = true;
+                                }
+                                else if (candidate != ac)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    if (hasCandidate && candidate > 0 && candidate <= 255)
+                    {
+                        if (linearIdx < 64)
+                            _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+                        else
+                            _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+                        _rowSums[vBase + row] += candidate;
+                        _rowCounts[vBase + row]++;
+                        _colSums[vBase + col] += candidate;
+                        _colCounts[vBase + col]++;
+                        if (row == col)
+                        {
+                            _diagSums[slotIndex] += candidate;
+                            _diagCounts[slotIndex]++;
+                        }
+                        if (row + col == gridSize - 1)
+                        {
+                            _antiDiagSums[slotIndex] += candidate;
+                            _antiDiagCounts[slotIndex]++;
+                        }
+
+                        for (int g = 0; g < groupCount; g++)
+                        {
+                            int groupIdx = _hexMemberToGroups[mBase + linearIdx * 7 + g];
+                            _hexCurrentSums[hBase + groupIdx] += candidate;
+                            _hexCounts[hBase + groupIdx]++;
+                        }
+
+                        if (rsGroup != NoRsGroup)
+                        {
+                            _rsCurrentParity[xBase + rsGroup] ^= GfMul((byte)candidate, GfExp[rsPos]);
+                            _rsCounts[xBase + rsGroup]++;
+                        }
+
+                        outputBuffer[totalRecovered++] = new MovePacket
+                        {
+                            SessionId = sessionId,
+                            Row = (byte)row,
+                            Col = (byte)col,
+                            Value = (byte)candidate
+                        };
+                        found = true;
+                        if (totalRecovered >= outputBuffer.Length)
+                            break;
+                    }
+                }
+            }
+            while (found && totalRecovered < outputBuffer.Length);
+            return totalRecovered;
+        }
+    }
+
     public sealed class GameSessionManager
     {
         public const int MaxSessions = 16384;
