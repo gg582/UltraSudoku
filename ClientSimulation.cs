@@ -33,6 +33,11 @@ namespace UltraSudoku
                 Benchmark.Run();
                 return;
             }
+            if (args.Length > 0 && args[0] == "test-multi")
+            {
+                TestMultiLoss.Run();
+                return;
+            }
 
             int durationSeconds = 0;
             if (args.Length > 0 && int.TryParse(args[0], out int minutes) && minutes > 0)

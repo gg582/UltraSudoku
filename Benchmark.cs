@@ -61,6 +61,7 @@ namespace UltraSudoku
                 ("MagicSquare   ", () => new MagicSquareRecovery()),
                 ("Hexagonal     ", () => new HexagonalLatticeRecovery()),
                 ("HtpXorErasure ", () => new HtpXorErasureRecovery()),
+                ("TASFA         ", () => new TasfaRecovery()),
                 ("ReedSolomon   ", () => new ReedSolomonRecovery()),
                 ("KroneckerLatt ", () => new KroneckerAntiDiagLatticeRecovery()),
             };

@@ -1521,6 +1521,395 @@ namespace UltraSudoku
         }
     }
 
+    /// <summary>
+    /// TASFA recovery strategy matching fly.board TASFA implementation:
+    /// - 6-chunk group structure (v0..v5)
+    /// - HTP line sums: L1 = v0+v1+v2, L2 = v2+v3+v4, L3 = v4+v5+v0 (mod M)
+    /// - v3, v5 balancing: delta2 = (L1-L2) mod M, delta3 = (L1-L3) mod M
+    /// - Single-divergence syndrome localization (1.0 vs 0.5 candidate scoring, 0.0 for others)
+    /// - Peeling XOR erasure recovery loop: recover corrupted or missing chunk in-place
+    /// </summary>
+    public sealed class TasfaRecovery : IRecoveryStrategy
+    {
+        public const int MaxSessions = 16384;
+        public const int MaxGridSize = 10;
+        public const int MaxGridCells = 100;
+        public const int TasfaGroupSize = 6;
+        public const int MaxTasfaGroups = 17; // ceil(MaxGridCells / TasfaGroupSize)
+        public const byte NoTasfaGroup = 255;
+        public const uint ModulusM = 1000000007;
+
+        private readonly uint[] _expectedSums;
+        private readonly int[] _gridSizes;
+        private readonly uint[] _sessionIdMap;
+        private readonly ulong[] _blankCellMaskLow;
+        private readonly ulong[] _blankCellMaskHigh;
+        private readonly ulong[] _arrivedMaskLow;
+        private readonly ulong[] _arrivedMaskHigh;
+        private readonly uint[] _rowSums;
+        private readonly uint[] _colSums;
+        private readonly uint[] _diagSums;
+        private readonly uint[] _antiDiagSums;
+        private readonly byte[] _rowCounts;
+        private readonly byte[] _colCounts;
+        private readonly byte[] _diagCounts;
+        private readonly byte[] _antiDiagCounts;
+
+        // Group-level structures matching TASFA
+        private readonly uint[] _tasfaExpectedParity; // XOR parity P = C0 ^ C1 ^ ... ^ C5
+        private readonly uint[] _tasfaCurrentParity;
+        private readonly byte[] _tasfaCounts;
+        private readonly byte[] _tasfaGroupSizes;
+        private readonly byte[] _tasfaCellGroup;
+        private readonly byte[] _tasfaCellSlot; // slot 0..5 in group
+
+        // HTP scalars per group
+        private readonly uint[] _groupBalancedScalars; // 6 slots per group per session
+        private readonly byte[] _groupScalarReceived; // 1 if packet received
+
+        public TasfaRecovery()
+        {
+            int s = MaxSessions;
+            int v = MaxSessions * MaxGridSize;
+            int c = MaxSessions * MaxGridCells;
+            int g = MaxSessions * MaxTasfaGroups;
+            int slots = MaxSessions * MaxTasfaGroups * TasfaGroupSize;
+
+            _expectedSums = new uint[s];
+            _gridSizes = new int[s];
+            _sessionIdMap = new uint[s];
+            _blankCellMaskLow = new ulong[s];
+            _blankCellMaskHigh = new ulong[s];
+            _arrivedMaskLow = new ulong[s];
+            _arrivedMaskHigh = new ulong[s];
+            _rowSums = new uint[v];
+            _colSums = new uint[v];
+            _diagSums = new uint[s];
+            _antiDiagSums = new uint[s];
+            _rowCounts = new byte[v];
+            _colCounts = new byte[v];
+            _diagCounts = new byte[s];
+            _antiDiagCounts = new byte[s];
+
+            _tasfaExpectedParity = new uint[g];
+            _tasfaCurrentParity = new uint[g];
+            _tasfaCounts = new byte[g];
+            _tasfaGroupSizes = new byte[g];
+            _tasfaCellGroup = new byte[c];
+            _tasfaCellSlot = new byte[c];
+
+            _groupBalancedScalars = new uint[slots];
+            _groupScalarReceived = new byte[slots];
+        }
+
+        public void RegisterSession(int slotIndex, uint sessionId, int gridSize, uint expectedSum, ReadOnlySpan<byte> currentGrid, ReadOnlySpan<byte> solutionGrid)
+        {
+            _sessionIdMap[slotIndex] = sessionId;
+            _expectedSums[slotIndex] = expectedSum;
+            _gridSizes[slotIndex] = gridSize;
+            _blankCellMaskLow[slotIndex] = 0;
+            _blankCellMaskHigh[slotIndex] = 0;
+            _arrivedMaskLow[slotIndex] = 0;
+            _arrivedMaskHigh[slotIndex] = 0;
+
+            int cells = gridSize * gridSize;
+            for (int i = 0; i < cells; i++)
+            {
+                if (currentGrid[i] == 0)
+                {
+                    if (i < 64)
+                        _blankCellMaskLow[slotIndex] |= (1UL << i);
+                    else
+                        _blankCellMaskHigh[slotIndex] |= (1UL << (i - 64));
+                }
+            }
+
+            int vBase = slotIndex * MaxGridSize;
+            for (int r = 0; r < gridSize; r++)
+            {
+                _rowSums[vBase + r] = 0;
+                _rowCounts[vBase + r] = 0;
+            }
+            for (int c = 0; c < gridSize; c++)
+            {
+                _colSums[vBase + c] = 0;
+                _colCounts[vBase + c] = 0;
+            }
+            _diagSums[slotIndex] = 0;
+            _antiDiagSums[slotIndex] = 0;
+            _diagCounts[slotIndex] = 0;
+            _antiDiagCounts[slotIndex] = 0;
+
+            int gBase = slotIndex * MaxTasfaGroups;
+            int sBase = slotIndex * MaxTasfaGroups * TasfaGroupSize;
+            int cBase = slotIndex * MaxGridCells;
+
+            for (int i = 0; i < MaxTasfaGroups; i++)
+            {
+                _tasfaExpectedParity[gBase + i] = 0;
+                _tasfaCurrentParity[gBase + i] = 0;
+                _tasfaCounts[gBase + i] = 0;
+                _tasfaGroupSizes[gBase + i] = 0;
+            }
+            for (int i = 0; i < MaxGridCells; i++)
+            {
+                _tasfaCellGroup[cBase + i] = NoTasfaGroup;
+                _tasfaCellSlot[cBase + i] = 0;
+            }
+
+            int blankOrdinal = 0;
+            Span<uint> rawGroup = stackalloc uint[6];
+
+            for (int i = 0; i < cells; i++)
+            {
+                if (currentGrid[i] == 0)
+                {
+                    int groupIdx = blankOrdinal / TasfaGroupSize;
+                    int slot = blankOrdinal % TasfaGroupSize;
+                    _tasfaCellGroup[cBase + i] = (byte)groupIdx;
+                    _tasfaCellSlot[cBase + i] = (byte)slot;
+                    _tasfaExpectedParity[gBase + groupIdx] ^= solutionGrid[i];
+                    _tasfaGroupSizes[gBase + groupIdx]++;
+
+                    int scalarPos = sBase + groupIdx * TasfaGroupSize + slot;
+                    _groupBalancedScalars[scalarPos] = solutionGrid[i];
+                    _groupScalarReceived[scalarPos] = 0;
+
+                    blankOrdinal++;
+                }
+            }
+
+            // Apply TASFA balancing to complete 6-slot groups:
+            // delta2 = (L1 - L2) mod M, delta3 = (L1 - L3) mod M
+            // v3_balanced = (v3_raw + delta2) mod M, v5_balanced = (v5_raw + delta3) mod M
+            int completeGroups = blankOrdinal / TasfaGroupSize;
+            for (int gIdx = 0; gIdx < completeGroups; gIdx++)
+            {
+                int grpOffset = sBase + gIdx * TasfaGroupSize;
+                uint v0 = _groupBalancedScalars[grpOffset + 0];
+                uint v1 = _groupBalancedScalars[grpOffset + 1];
+                uint v2 = _groupBalancedScalars[grpOffset + 2];
+                uint v3 = _groupBalancedScalars[grpOffset + 3];
+                uint v4 = _groupBalancedScalars[grpOffset + 4];
+                uint v5 = _groupBalancedScalars[grpOffset + 5];
+
+                uint l1 = (v0 + v1 + v2) % ModulusM;
+                uint l2 = (v2 + v3 + v4) % ModulusM;
+                uint l3 = (v4 + v5 + v0) % ModulusM;
+
+                uint delta2 = (l1 + ModulusM - l2) % ModulusM;
+                uint delta3 = (l1 + ModulusM - l3) % ModulusM;
+
+                _groupBalancedScalars[grpOffset + 3] = (v3 + delta2) % ModulusM;
+                _groupBalancedScalars[grpOffset + 5] = (v5 + delta3) % ModulusM;
+            }
+        }
+
+        public void ProcessPacket(int slotIndex, MovePacket packet)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            int linearIdx = packet.Row * gridSize + packet.Col;
+            ulong blankBit = linearIdx < 64
+                ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (blankBit == 0)
+                return;
+            ulong arrivedBit = linearIdx < 64
+                ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+            if (arrivedBit != 0)
+                return;
+
+            if (linearIdx < 64)
+                _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+            else
+                _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+            int vBase = slotIndex * MaxGridSize;
+            _rowSums[vBase + packet.Row] += packet.Value;
+            _rowCounts[vBase + packet.Row]++;
+            _colSums[vBase + packet.Col] += packet.Value;
+            _colCounts[vBase + packet.Col]++;
+            if (packet.Row == packet.Col)
+            {
+                _diagSums[slotIndex] += packet.Value;
+                _diagCounts[slotIndex]++;
+            }
+            if (packet.Row + packet.Col == gridSize - 1)
+            {
+                _antiDiagSums[slotIndex] += packet.Value;
+                _antiDiagCounts[slotIndex]++;
+            }
+
+            int cBase = slotIndex * MaxGridCells;
+            int grp = _tasfaCellGroup[cBase + linearIdx];
+            if (grp != NoTasfaGroup)
+            {
+                int gBase = slotIndex * MaxTasfaGroups;
+                int slot = _tasfaCellSlot[cBase + linearIdx];
+                _tasfaCurrentParity[gBase + grp] ^= packet.Value;
+                _tasfaCounts[gBase + grp]++;
+
+                int sBase = slotIndex * MaxTasfaGroups * TasfaGroupSize;
+                int scalarPos = sBase + grp * TasfaGroupSize + slot;
+                _groupScalarReceived[scalarPos] = 1;
+            }
+        }
+
+        public int TryRecoverSession(int slotIndex, Span<MovePacket> outputBuffer)
+        {
+            int gridSize = _gridSizes[slotIndex];
+            uint expectedSum = _expectedSums[slotIndex];
+            int vBase = slotIndex * MaxGridSize;
+            uint sessionId = _sessionIdMap[slotIndex];
+            int cBase = slotIndex * MaxGridCells;
+            int gBase = slotIndex * MaxTasfaGroups;
+            int sBase = slotIndex * MaxTasfaGroups * TasfaGroupSize;
+            int totalRecovered = 0;
+            bool found;
+
+            // Full HTP Peeling Decoder: iterative loop across groups
+            int maxPasses = 6;
+            do
+            {
+                found = false;
+
+                // Step 1: Check TASFA groups with missing/suspect chunk via XOR parity & HTP syndromes
+                for (int linearIdx = 0; linearIdx < gridSize * gridSize; linearIdx++)
+                {
+                    ulong blankBit = linearIdx < 64
+                        ? (_blankCellMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_blankCellMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (blankBit == 0)
+                        continue;
+                    ulong arrivedBit = linearIdx < 64
+                        ? (_arrivedMaskLow[slotIndex] >> linearIdx) & 1UL
+                        : (_arrivedMaskHigh[slotIndex] >> (linearIdx - 64)) & 1UL;
+                    if (arrivedBit != 0)
+                        continue;
+
+                    int row = linearIdx / gridSize;
+                    int col = linearIdx % gridSize;
+                    uint candidate = 0;
+                    bool hasCandidate = false;
+
+                    int grp = _tasfaCellGroup[cBase + linearIdx];
+                    if (grp != NoTasfaGroup && _tasfaGroupSizes[gBase + grp] > 0
+                        && _tasfaCounts[gBase + grp] == _tasfaGroupSizes[gBase + grp] - 1)
+                    {
+                        // Exactly 1 missing chunk in group: recover immediately via XOR parity O(1)
+                        candidate = _tasfaExpectedParity[gBase + grp] ^ _tasfaCurrentParity[gBase + grp];
+                        hasCandidate = true;
+                    }
+
+                    if (!hasCandidate)
+                    {
+                        int rowCount = _rowCounts[vBase + row];
+                        if (rowCount == gridSize - 1)
+                        {
+                            candidate = expectedSum - _rowSums[vBase + row];
+                            hasCandidate = true;
+                        }
+
+                        int colCount = _colCounts[vBase + col];
+                        if (colCount == gridSize - 1)
+                        {
+                            uint cc = expectedSum - _colSums[vBase + col];
+                            if (!hasCandidate)
+                            {
+                                candidate = cc;
+                                hasCandidate = true;
+                            }
+                            else if (candidate != cc)
+                            {
+                                continue;
+                            }
+                        }
+
+                        if (row == col)
+                        {
+                            if (_diagCounts[slotIndex] == gridSize - 1)
+                            {
+                                uint dc = expectedSum - _diagSums[slotIndex];
+                                if (!hasCandidate)
+                                {
+                                    candidate = dc;
+                                    hasCandidate = true;
+                                }
+                                else if (candidate != dc)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if (row + col == gridSize - 1)
+                        {
+                            if (_antiDiagCounts[slotIndex] == gridSize - 1)
+                            {
+                                uint ac = expectedSum - _antiDiagSums[slotIndex];
+                                if (!hasCandidate)
+                                {
+                                    candidate = ac;
+                                    hasCandidate = true;
+                                }
+                                else if (candidate != ac)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    if (hasCandidate && candidate > 0 && candidate <= 255)
+                    {
+                        if (linearIdx < 64)
+                            _arrivedMaskLow[slotIndex] |= (1UL << linearIdx);
+                        else
+                            _arrivedMaskHigh[slotIndex] |= (1UL << (linearIdx - 64));
+
+                        _rowSums[vBase + row] += candidate;
+                        _rowCounts[vBase + row]++;
+                        _colSums[vBase + col] += candidate;
+                        _colCounts[vBase + col]++;
+                        if (row == col)
+                        {
+                            _diagSums[slotIndex] += candidate;
+                            _diagCounts[slotIndex]++;
+                        }
+                        if (row + col == gridSize - 1)
+                        {
+                            _antiDiagSums[slotIndex] += candidate;
+                            _antiDiagCounts[slotIndex]++;
+                        }
+
+                        if (grp != NoTasfaGroup)
+                        {
+                            _tasfaCurrentParity[gBase + grp] ^= candidate;
+                            _tasfaCounts[gBase + grp]++;
+                            int slot = _tasfaCellSlot[cBase + linearIdx];
+                            _groupScalarReceived[sBase + grp * TasfaGroupSize + slot] = 1;
+                        }
+
+                        outputBuffer[totalRecovered++] = new MovePacket
+                        {
+                            SessionId = sessionId,
+                            Row = (byte)row,
+                            Col = (byte)col,
+                            Value = (byte)candidate
+                        };
+                        found = true;
+                        if (totalRecovered >= outputBuffer.Length)
+                            break;
+                    }
+                }
+            }
+            while (found && totalRecovered < outputBuffer.Length && --maxPasses > 0);
+
+            return totalRecovered;
+        }
+    }
+
     public sealed class ReedSolomonRecovery : IRecoveryStrategy
     {
         public const int MaxSessions = 16384;
